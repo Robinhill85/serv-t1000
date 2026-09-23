@@ -5,7 +5,7 @@
 //              route is checked end to end without touching the chain.
 //   execute()  sends them, leg by leg, through Coinbase AgentKit's ViemWalletProvider (each step and hash visible).
 //              Only reachable after checkExecutable() passes and the caller clears the route's own gates.
-import { ViemWalletProvider } from "@coinbase/agentkit";
+import type { ViemWalletProvider } from "@coinbase/agentkit";
 import { buildApproveTx, buildRequestDepositTx, KNOWN_VAULTS } from "@ixswap1/vault-agent-sdk";
 import {
   createWalletClient, encodeAbiParameters, encodeFunctionData, keccak256, maxUint256, numberToHex, pad, parseAbi, parseUnits,
@@ -39,10 +39,18 @@ const routerAbi = parseAbi([
 ]);
 const SWAP_SLIPPAGE_BPS = 50n;
 
+/** Signing account: only exists where live runs are allowed (Robin's machine). Never configured on Vercel. */
 export function agentAccount() {
   const pk = process.env.AGENT_PRIVATE_KEY as Hex | undefined;
-  if (!pk) throw new Error("AGENT_PRIVATE_KEY is not set");
+  if (!pk) throw new Error("Live runs are not available on this deployment.");
   return privateKeyToAccount(pk);
+}
+
+/** The agent's public address: enough to read positions and simulate. Prefers AGENT_ADDRESS (no key needed). */
+export function agentAddress(): Address {
+  const a = process.env.AGENT_ADDRESS as Address | undefined;
+  if (a && /^0x[0-9a-fA-F]{40}$/.test(a)) return a;
+  return agentAccount().address;
 }
 
 /** Builds the ordered transactions for every leg of a plan. Reads live quotes and allowances. */
@@ -151,11 +159,20 @@ export async function simulate(steps: Step[], agent: Address, onStep?: (r: StepR
   return out;
 }
 
-function provider(chain: ChainKey) {
+// AgentKit is loaded only when a live run sends transactions: its dependency tree (Solana, native bigint bindings)
+// breaks Next's build-time route analysis if imported at module scope.
+async function provider(chain: ChainKey) {
+  const { ViemWalletProvider } = await import("@coinbase/agentkit");
+  // AgentKit fires an un-awaited analytics call (wallet address included) from the provider constructor; when that
+  // request fails it becomes an unhandled rejection that can kill the process mid-run. Skip it.
+  // (trackInitialization is private in AgentKit's types, so the override goes through a cast.)
+  const Provider = class extends (ViemWalletProvider as unknown as new (w: unknown) => object) {
+    trackInitialization() {}
+  } as unknown as typeof ViemWalletProvider;
   const account = agentAccount();
   const wallet = createWalletClient({ account, chain: CHAINS[chain].chain, transport: transport(chain) });
   // AgentKit bundles its own viem copy: the client is runtime-compatible, the types just come from two installs.
-  return new ViemWalletProvider(wallet as unknown as ConstructorParameters<typeof ViemWalletProvider>[0]);
+  return new Provider(wallet as unknown as ConstructorParameters<typeof ViemWalletProvider>[0]);
 }
 
 /** Sends every step through AgentKit, in order, waiting for each receipt. Stops at the first failure. */
@@ -163,7 +180,7 @@ export async function execute(steps: Step[], onStep: (r: StepResult) => void): P
   const results: StepResult[] = [];
   const providers = new Map<ChainKey, ViemWalletProvider>();
   for (const s of steps) {
-    const p = providers.get(s.chain) ?? provider(s.chain);
+    const p = providers.get(s.chain) ?? (await provider(s.chain));
     providers.set(s.chain, p);
     try {
       const data = encodeFunctionData({ abi: s.abi, functionName: s.functionName, args: s.args } as never);

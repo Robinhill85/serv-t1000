@@ -1,0 +1,11 @@
+# never upload secrets or internal/working material
+.env*
+!.env.example
+BRIEF.md
+assets/
+reference/
+.firecrawl/
+.playwright-mcp/
+.claude/
+docs/*.txt
+sim/

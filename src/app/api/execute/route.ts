@@ -3,7 +3,7 @@
 // Both modes re-check the plan against fresh signals and the rulebook first.
 import { z } from "zod";
 import { executionLimits } from "@/lib/config";
-import { agentAccount, buildSteps, execute, simulate, type StepResult } from "@/lib/execute";
+import { agentAddress, buildSteps, execute, simulate, type StepResult } from "@/lib/execute";
 import { checkExecutable } from "@/lib/plan-guard";
 import { passcodeOk, verifyPlan } from "@/lib/plan-token";
 import { ProfileSchema } from "@/lib/profile-schema";
@@ -42,6 +42,7 @@ export async function POST(req: Request) {
     if (!process.env.LIVE_PASSCODE) return Response.json({ error: "Live runs are not configured on this deployment." }, { status: 403 });
     if (!passcodeOk(passcode)) return Response.json({ error: "Wrong passcode. Live runs are for the operator; anyone can run a simulation." }, { status: 403 });
     if (!limits.enabled) return Response.json({ error: "Execution is switched off (kill switch)." }, { status: 403 });
+    if (!process.env.AGENT_PRIVATE_KEY) return Response.json({ error: "Live runs are not available on this deployment." }, { status: 403 });
   }
 
   const encoder = new TextEncoder();
@@ -49,7 +50,7 @@ export async function POST(req: Request) {
     async start(controller) {
       const send = (e: ExecuteEvent) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(e)}\n\n`));
       try {
-        const agent = agentAccount().address;
+        const agent = agentAddress();
         const s = await getSignals(agent);
         const elig = eligibility(profile, {
           ixs: { paused: s.ixs.paused, whitelistEnabled: s.ixs.whitelistEnabled, agentWhitelisted: s.ixs.agentWhitelisted },
