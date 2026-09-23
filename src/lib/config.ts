@@ -12,11 +12,12 @@ export const robinhood = defineChain({
 
 export type ChainKey = "base" | "avalanche" | "robinhood";
 
-// publicRpc = fallback when Alchemy fails or the network is not enabled on the Alchemy app.
+// publicRpcs = fallbacks, in order, when Alchemy fails or the network is not enabled on the Alchemy app.
+// Order matters for simulation: mainnet.base.org silently ignores eth_call state overrides; publicnode honours them.
 // Robinhood Chain has none: its public RPC returns 403 on eth_call.
-export const CHAINS: Record<ChainKey, { chain: Chain; alchemy: string; publicRpc?: string; explorer: string }> = {
-  base: { chain: base, alchemy: "base-mainnet", publicRpc: "https://mainnet.base.org", explorer: "https://basescan.org" },
-  avalanche: { chain: avalanche, alchemy: "avax-mainnet", publicRpc: "https://api.avax.network/ext/bc/C/rpc", explorer: "https://snowtrace.io" },
+export const CHAINS: Record<ChainKey, { chain: Chain; alchemy: string; publicRpcs?: string[]; explorer: string }> = {
+  base: { chain: base, alchemy: "base-mainnet", publicRpcs: ["https://base-rpc.publicnode.com", "https://mainnet.base.org"], explorer: "https://basescan.org" },
+  avalanche: { chain: avalanche, alchemy: "avax-mainnet", publicRpcs: ["https://api.avax.network/ext/bc/C/rpc"], explorer: "https://snowtrace.io" },
   robinhood: { chain: robinhood, alchemy: "robinhood-mainnet", explorer: "https://robinhoodchain.blockscout.com" },
 };
 

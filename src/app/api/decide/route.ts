@@ -1,6 +1,7 @@
 // Streams the think step to the HUD as server-sent events: signals, eligibility, Jev, fast draft, verified decision, plan.
 import { privateKeyToAccount } from "viem/accounts";
 import { runPipeline, type PipelineEvent } from "@/lib/pipeline";
+import { signPlan } from "@/lib/plan-token";
 import { ProfileSchema } from "@/lib/profile-schema";
 
 export const runtime = "nodejs";
@@ -21,8 +22,15 @@ export async function POST(req: Request) {
   const stream = new ReadableStream({
     async start(controller) {
       const send = (e: PipelineEvent | { type: "done" }) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(e)}\n\n`));
+      // Verified plans are signed so /api/execute only runs plans this server issued (unverified ones stay unsigned).
+      const sendSigned = (e: PipelineEvent) => {
+        if (e.type === "plan" && e.verified) {
+          const { iat, token } = signPlan(parsed.data, e.legs);
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ ...e, iat, planToken: token })}\n\n`));
+        } else send(e);
+      };
       try {
-        await runPipeline(parsed.data, send, { agent: agentAddress() });
+        await runPipeline(parsed.data, sendSigned, { agent: agentAddress() });
       } catch (err) {
         send({ type: "error", message: err instanceof Error ? err.message : "Pipeline failed." });
       }

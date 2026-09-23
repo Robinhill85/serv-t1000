@@ -9,6 +9,9 @@ import type { Holding } from "./scan";
 import type { Signals } from "./signals";
 import type { Eligibility, Leg, Profile, Split } from "./types";
 
+export type StepView = { venue: string; chain: string; label: string; ok?: boolean; detail?: string; hash?: string; explorer?: string };
+export type Execution = { mode: "simulate" | "live"; status: "running" | "done" | "failed"; checks: string[]; steps: StepView[]; error?: string };
+
 export type Phase = "idle" | "scanning_wallet" | "profile" | "targeting" | "deciding" | "verifying" | "done" | "error";
 
 export type RunState = {
@@ -21,7 +24,9 @@ export type RunState = {
   jev: JevResult | null;
   fast: { result: DecideResult; split: Split | null; legs: Leg[] } | null;
   verified: { result: DecideResult; revised: boolean } | null;
-  plan: { split: Split; legs: Leg[]; adjustments: string[]; verified: boolean } | null;
+  plan: { split: Split; legs: Leg[]; adjustments: string[]; verified: boolean; iat?: number; planToken?: string } | null;
+  profile: Profile | null;
+  execution: Execution | null;
   error: string | null;
   startedAt: number | null;
   /** Client arrival times, used to pace the HUD animation. */
@@ -30,7 +35,7 @@ export type RunState = {
 
 const initial: RunState = {
   phase: "idle", holdings: null, idleStablesUsd: null, maxRunUsd: null, signals: null, eligibility: null, jev: null,
-  fast: null, verified: null, plan: null, error: null, startedAt: null, arrived: {},
+  fast: null, verified: null, plan: null, error: null, startedAt: null, arrived: {}, profile: null, execution: null,
 };
 
 export function useT1000() {
@@ -55,7 +60,7 @@ export function useT1000() {
     abortRef.current?.abort();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-    setState((s) => ({ ...s, phase: "targeting", signals: null, eligibility: null, jev: null, fast: null, verified: null, plan: null, error: null, startedAt: Date.now(), arrived: {} }));
+    setState((s) => ({ ...s, phase: "targeting", signals: null, eligibility: null, jev: null, fast: null, verified: null, plan: null, error: null, startedAt: Date.now(), arrived: {}, profile, execution: null }));
     try {
       const res = await fetch("/api/decide", {
         method: "POST",
@@ -90,7 +95,10 @@ export function useT1000() {
           case "jev": return { ...s, jev: e.jev };
           case "decision_fast": return { ...s, fast: { result: e.result, split: e.split, legs: e.legs }, phase: "verifying", arrived: { ...s.arrived, fast: Date.now() } };
           case "decision_verified": return { ...s, verified: { result: e.result, revised: e.revised } };
-          case "plan": return { ...s, plan: { split: e.split, legs: e.legs, adjustments: e.adjustments, verified: e.verified }, phase: "done" };
+          case "plan": {
+            const signed = e as typeof e & { iat?: number; planToken?: string };
+            return { ...s, plan: { split: e.split, legs: e.legs, adjustments: e.adjustments, verified: e.verified, iat: signed.iat, planToken: signed.planToken }, phase: "done" };
+          }
           case "error": return { ...s, phase: "error", error: e.message };
           default: return s;
         }
@@ -98,6 +106,52 @@ export function useT1000() {
     }
   }, []);
 
+  /** Runs the signed plan: "simulate" for anyone (nothing is sent), "live" with the operator passcode. */
+  const executePlan = useCallback(async (mode: "simulate" | "live", plan: RunState["plan"], profile: Profile | null, passcode?: string) => {
+    if (!plan?.planToken || !profile) return;
+    setState((s) => ({ ...s, execution: { mode, status: "running", checks: [], steps: [] } }));
+    const fail = (error: string) => setState((s) => ({ ...s, execution: { ...(s.execution ?? { mode, checks: [], steps: [] }), status: "failed", error } }));
+    try {
+      const res = await fetch("/api/execute", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode, profile, legs: plan.legs, iat: plan.iat, planToken: plan.planToken, passcode }),
+      });
+      if (!res.ok || !res.body) { fail((await res.json().catch(() => ({}))).error ?? "Execution failed."); return; }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n\n")) >= 0) {
+          const chunk = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          if (!chunk.startsWith("data: ")) continue;
+          const e = JSON.parse(chunk.slice(6));
+          setState((s) => {
+            const ex = s.execution ?? { mode, status: "running" as const, checks: [], steps: [] };
+            switch (e.type) {
+              case "checks": return { ...s, execution: { ...ex, checks: e.errors } };
+              case "steps": return { ...s, execution: { ...ex, steps: e.steps } };
+              case "step": {
+                const steps = ex.steps.map((st) => (st.label === e.result.label && st.ok === undefined ? { ...st, ...e.result } : st));
+                return { ...s, execution: { ...ex, steps } };
+              }
+              case "done": return { ...s, execution: { ...ex, status: e.ok ? "done" : "failed" } };
+              case "error": return { ...s, execution: { ...ex, status: "failed", error: e.message } };
+              default: return s;
+            }
+          });
+        }
+      }
+    } catch (e) {
+      fail(e instanceof Error ? e.message : "Execution failed.");
+    }
+  }, []);
+
   const reset = useCallback(() => { abortRef.current?.abort(); setState(initial); }, []);
-  return { state, scanWallet, run, reset };
+  return { state, scanWallet, run, reset, executePlan };
 }

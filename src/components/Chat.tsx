@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { VENUES } from "@/lib/config";
+import { whenIntroDone } from "@/components/Intro";
 import type { Profile } from "@/lib/types";
 import type { RunState } from "@/lib/use-t1000";
 
@@ -37,12 +38,15 @@ const DEMOS: Record<string, Profile> = {
 };
 const usd = (n: number) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-export function Chat({ state, onScan, onRun, onReset }: {
+export function Chat({ state, onScan, onRun, onReset, onExecute }: {
   state: RunState;
   onScan: (address: string) => Promise<number | null>;
   onRun: (p: Profile) => void;
   onReset: () => void;
+  onExecute: (mode: "simulate" | "live", plan: RunState["plan"], profile: Profile | null, passcode?: string) => void;
 }) {
+  const [liveOpen, setLiveOpen] = useState(false);
+  const [passcode, setPasscode] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([{ from: "agent", text: "I'm T1000. I find idle stablecoins and decide where they should live. Connect a wallet so I can see what you hold." }]);
   const [address, setAddress] = useState(DEMO_WALLET);
   const [step, setStep] = useState(-1);
@@ -53,7 +57,7 @@ export function Chat({ state, onScan, onRun, onReset }: {
   useEffect(() => {
     const el = logRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [msgs, state.phase, state.plan, state.verified]);
+  }, [msgs, state.phase, state.plan, state.verified, state.execution]);
 
   const say = (m: Msg) => setMsgs((x) => [...x, m]);
 
@@ -64,7 +68,7 @@ export function Chat({ state, onScan, onRun, onReset }: {
     const demo = key ? DEMOS[key] : undefined;
     if (!demo || autoRan.current) return;
     autoRan.current = true;
-    (async () => {
+    whenIntroDone(async () => {
       say({ from: "user", text: `Scan ${DEMO_WALLET.slice(0, 6)}…${DEMO_WALLET.slice(-4)}` });
       const idle = await onScan(DEMO_WALLET);
       if (idle != null) say({ from: "agent", text: `I see ${usd(idle)} in idle stablecoins across Base, Avalanche and Robinhood Chain.` });
@@ -77,7 +81,7 @@ export function Chat({ state, onScan, onRun, onReset }: {
       setStep(STEPS.length);
       say({ from: "agent", text: "Scanning the market. Watch the left side." });
       onRun(demo);
-    })();
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -189,9 +193,45 @@ export function Chat({ state, onScan, onRun, onReset }: {
               <div className="plan-blocked">Excluded: {verifiedDecision.blocked.map((b) => `${VENUES[b.venue].name} (${b.reason.replace(/_/g, " ").toLowerCase()})`).join(", ")}</div>
             ) : null}
             {state.plan.adjustments.map((a) => <div key={a} className="plan-adjust">Guard: {a}</div>)}
-            <button className="btn-approve" disabled title="Execution comes online with the agent wallet executor.">
-              {state.plan.verified ? "Approve & execute (executor offline)" : "Not verified: cannot execute"}
-            </button>
+            {state.plan.verified && state.plan.planToken ? (
+              <div className="exec-actions">
+                <button className="btn-approve" disabled={state.execution?.status === "running"} onClick={() => onExecute("simulate", state.plan, state.profile)}>
+                  {state.execution?.status === "running" && state.execution.mode === "simulate" ? "Simulating…" : "Simulate the run (no funds move)"}
+                </button>
+                {!liveOpen ? (
+                  <button className="btn-live-link" onClick={() => setLiveOpen(true)}>Operator: run live</button>
+                ) : (
+                  <form className="chat-row" onSubmit={(e) => { e.preventDefault(); onExecute("live", state.plan, state.profile, passcode); setPasscode(""); }}>
+                    <input type="password" value={passcode} onChange={(e) => setPasscode(e.target.value)} placeholder="Operator passcode" aria-label="Operator passcode" autoComplete="off" />
+                    <button type="submit" disabled={!passcode || state.execution?.status === "running"}>Run live</button>
+                  </form>
+                )}
+              </div>
+            ) : (
+              <button className="btn-approve" disabled>Not verified: cannot execute</button>
+            )}
+          </div>
+        )}
+
+        {state.execution && (
+          <div className="msg msg-agent msg-plan">
+            <div className="msg-kicker">
+              {state.execution.mode === "live" ? "Live run" : "Simulation"} · {state.execution.status === "running" ? "in progress" : state.execution.status === "done" ? (state.execution.mode === "live" ? "all confirmed" : "every step passes, nothing was sent") : "stopped"}
+            </div>
+            {state.execution.checks.map((c) => <div key={c} className="plan-adjust">Blocked: {c}</div>)}
+            {state.execution.steps.map((st, i) => (
+              <div key={i} className="exec-step">
+                <span className={`exec-dot ${st.ok === undefined ? "is-pending" : st.ok ? "is-ok" : "is-fail"}`} />
+                <div>
+                  <div>{st.label}</div>
+                  <div className="plan-cite">
+                    {st.chain} · {st.ok === undefined ? "waiting" : st.detail}
+                    {st.explorer && <> · <a href={st.explorer} target="_blank" rel="noopener noreferrer">view tx</a></>}
+                  </div>
+                </div>
+              </div>
+            ))}
+            {state.execution.error && <div className="plan-adjust">{state.execution.error}</div>}
           </div>
         )}
 

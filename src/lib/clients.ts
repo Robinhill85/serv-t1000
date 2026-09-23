@@ -6,8 +6,8 @@ const cache = new Map<ChainKey, PublicClient>();
 /** Alchemy first, then the chain's public RPC (if it has a usable one). Shared by read and wallet clients. */
 export function transport(key: ChainKey): Transport {
   const primary = http(rpcUrl(key), { timeout: 10_000, retryCount: 1 });
-  const pub = CHAINS[key].publicRpc;
-  return pub ? fallback([primary, http(pub, { timeout: 10_000 })]) : primary;
+  const pubs = CHAINS[key].publicRpcs ?? [];
+  return pubs.length ? fallback([primary, ...pubs.map((u) => http(u, { timeout: 10_000 }))]) : primary;
 }
 
 export function publicClient(key: ChainKey): PublicClient {
