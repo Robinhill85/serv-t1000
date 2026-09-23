@@ -33,6 +33,7 @@ export const REASON_CODES = [
   "PRICING_UNRELIABLE",
   "NOT_EXECUTABLE_V1",
   "LOW_SCORE",
+  "NO_FUNDS_ON_CHAIN",
 ] as const;
 export type ReasonCode = (typeof REASON_CODES)[number];
 
@@ -56,3 +57,15 @@ export type Decision = {
 };
 
 export type Leg = { venue: VenueId; pct: number; usd: number };
+
+/** A held (or projected) position in one venue, valued in USD. */
+export type Position = {
+  venue: VenueId;
+  usd: number;
+  status: "PENDING_T1" | "SETTLED" | "EARNING" | "HELD" | "EMPTY";
+  detail: string;
+};
+
+export const TRIGGER_CODES = ["DRIFT", "YIELD_GAP", "VAULT_RULE", "NEW_CASH"] as const;
+export type TriggerCode = (typeof TRIGGER_CODES)[number];
+export type Trigger = { code: TriggerCode; venue?: VenueId; detail: string };

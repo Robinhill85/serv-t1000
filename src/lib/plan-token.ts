@@ -31,3 +31,18 @@ export function passcodeOk(given: string | undefined): boolean {
   const a = Buffer.from(given), b = Buffer.from(want);
   return a.length === b.length && timingSafeEqual(a, b);
 }
+
+// Guard-mode move plans are signed the same way, binding the moves to their source and any scenario.
+type MovePlan = { moves: { from: string; to: string; usd: number }[]; source: "simulated" | "live"; scenario: boolean };
+function canonicalMoves(p: MovePlan, iat: number) {
+  return JSON.stringify({ k: "moves", m: p.moves.map((x) => [x.from, x.to, x.usd]), s: p.source, sc: p.scenario, iat });
+}
+export function signMoves(p: MovePlan, iat = Date.now()) {
+  return { iat, token: createHmac("sha256", secret()).update(canonicalMoves(p, iat)).digest("hex") };
+}
+export function verifyMoves(p: MovePlan, iat: number, token: string): string | null {
+  if (!Number.isFinite(iat) || Date.now() - iat > MAX_AGE_MS || iat > Date.now() + 60_000) return "This proposal has expired. Scan again.";
+  const expected = Buffer.from(createHmac("sha256", secret()).update(canonicalMoves(p, iat)).digest("hex"));
+  const got = Buffer.from(String(token));
+  return expected.length === got.length && timingSafeEqual(expected, got) ? null : "This proposal was not issued by this server.";
+}

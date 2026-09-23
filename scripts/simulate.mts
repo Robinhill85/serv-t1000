@@ -11,3 +11,19 @@ const agent = agentAccount().address;
 console.log(`agent ${agent}, legs ${JSON.stringify(legs)}`);
 const steps = await buildSteps(legs, agent);
 for (const r of await simulate(steps, agent)) console.log(`${r.ok ? "OK  " : "FAIL"} [${r.chain}] ${r.label}: ${r.detail}`);
+
+// Guard-mode moves: `npx tsx --env-file=.env.local scripts/simulate.mts moves`
+if (process.argv.includes("moves")) {
+  const { buildMoveSteps, ixsRedeemMinUsd } = await import("../src/lib/execute.ts");
+  const { getSignals } = await import("../src/lib/signals.ts");
+  const s = await getSignals(agent);
+  const min = await ixsRedeemMinUsd();
+  console.log(`\nmoves (IXS redeem minimum $${min}, ETH $${s.rhEth.priceUsd})`);
+  const moves = [
+    { from: "base", to: "idle", usd: 20, bridge_required: false, why: "" },
+    { from: "rh_eth", to: "idle", usd: 10, bridge_required: false, why: "" },
+    { from: "ixs", to: "idle", usd: Math.max(50, min), bridge_required: false, why: "" },
+  ] as never;
+  const mSteps = await buildMoveSteps(moves, agent, s.rhEth.priceUsd!);
+  for (const r of await simulate(mSteps, agent)) console.log(`${r.ok ? "OK  " : "FAIL"} [${r.chain}] ${r.label}: ${r.detail}`);
+}

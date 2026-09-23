@@ -2,12 +2,15 @@
 // The liquid moment: a chrome mass (metaballs) above three glass vaults pours into each vault as that leg's
 // transactions pass (simulated) or confirm (live). Vault colours match the intro's lamps: amber IXS, cyan
 // Robinhood Chain, blue Base. Fill height = the leg's share of the plan.
+// Rebalances pass `from` (levels before the moves): vaults that shrink stream back up into the mass (idle capital),
+// vaults that grow receive streams.
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { MarchingCubes } from "three/examples/jsm/objects/MarchingCubes.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { VENUES, type VenueId } from "@/lib/config";
-import type { Leg } from "@/lib/types";
+import type { Move } from "@/lib/rebalance";
+import type { Leg, Position } from "@/lib/types";
 import type { Execution } from "@/lib/use-t1000";
 
 type Slot = { venue: VenueId; x: number; color: number; css: string };
@@ -37,18 +40,29 @@ export function vaultStatus(venue: VenueId, execution: Execution | null): { stat
   return { status: done > 0 ? "flowing" : "idle", note: done > 0 ? (execution.mode === "live" ? "SENDING…" : "SIMULATING…") : "QUEUED" };
 }
 
+/** Vault levels before and after a set of moves, both as shares of the value held before them. */
+export function rebalanceLegs(positions: Position[], moves: Move[]): { from: Leg[]; to: Leg[] } {
+  const total = positions.reduce((a, p) => a + p.usd, 0) || 1;
+  const from = positions.map((p) => ({ venue: p.venue, usd: p.usd, pct: (p.usd / total) * 100 }));
+  const to = from.map((l) => {
+    const usd = Math.max(0, moves.reduce((a, m) => a + (m.to === l.venue ? m.usd : 0) - (m.from === l.venue ? m.usd : 0), l.usd));
+    return { venue: l.venue, usd: Math.round(usd * 100) / 100, pct: (usd / total) * 100 };
+  });
+  return { from, to };
+}
+
 const toCube = (v: THREE.Vector3) => [
   (v.x - MC_POS.x) / (2 * MC_SCALE) + 0.5,
   (v.y - MC_POS.y) / (2 * MC_SCALE) + 0.5,
   (v.z - MC_POS.z) / (2 * MC_SCALE) + 0.5,
 ] as const;
 
-export function LiquidScene({ legs, execution }: { legs: Leg[]; execution: Execution | null }) {
+export function LiquidScene({ legs, execution, from }: { legs: Leg[]; execution: Execution | null; from?: Leg[] }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const labelRefs = useRef<(HTMLDivElement | null)[]>([]);
   // Live data for the render loop, updated from props without re-creating the scene.
-  const live = useRef({ legs, execution });
-  useEffect(() => { live.current = { legs, execution }; }, [legs, execution]);
+  const live = useRef({ legs, execution, from });
+  useEffect(() => { live.current = { legs, execution, from }; }, [legs, execution, from]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -100,7 +114,8 @@ export function LiquidScene({ legs, execution }: { legs: Leg[]; execution: Execu
       light.position.set(0, VAULT_BOTTOM + VAULT_H + 0.6, 1.1);
       group.add(shell, base, ring, target, column, light);
       scene.add(group);
-      return { slot, group, column, target, shell, level: 0, streamT: 0 };
+      const start = (live.current.from?.find((l) => l.venue === slot.venue)?.pct ?? 0) / 100;
+      return { slot, group, column, target, shell, level: start * MAX_FILL, streamT: 0 };
     });
 
     const key = new THREE.DirectionalLight(0xffffff, 1.2);
@@ -139,7 +154,7 @@ export function LiquidScene({ legs, execution }: { legs: Leg[]; execution: Execu
       // Real elapsed time (capped at 0.5s after a stall), so fills keep pace even if frames are slow.
       const dt = Math.min(clock.getDelta(), 0.5);
       const t = clock.elapsedTime;
-      const { legs: L, execution: ex } = live.current;
+      const { legs: L, execution: ex, from: F } = live.current;
 
       mc.reset();
       let pouredShare = 0;
@@ -149,8 +164,10 @@ export function LiquidScene({ legs, execution }: { legs: Leg[]; execution: Execu
         const share = leg ? leg.pct / 100 : 0;
         const { status } = vaultStatus(v.slot.venue, ex);
         const targetH = share * MAX_FILL;
-        // Level follows status: flowing fills to 35% of the target, filled/confirmed to 100%.
-        const goal = status === "filled" ? targetH : status === "flowing" ? targetH * 0.35 : 0;
+        const startH = ((F?.find((l) => l.venue === v.slot.venue)?.pct ?? 0) / 100) * MAX_FILL;
+        // Level follows status: flowing moves 35% of the way from start to target, filled/confirmed all the way.
+        const goal = status === "filled" ? targetH : status === "flowing" ? startH + (targetH - startH) * 0.35 : startH;
+        const draining = targetH < startH - 1e-4;
         v.level += (goal - v.level) * (1 - Math.exp(-dt * 1.8));
         v.column.visible = v.level > 0.01;
         v.column.scale.y = Math.max(0.001, v.level);
@@ -158,7 +175,7 @@ export function LiquidScene({ legs, execution }: { legs: Leg[]; execution: Execu
         (v.target.material as THREE.MeshBasicMaterial).opacity = share > 0 ? 0.55 + 0.25 * Math.sin(t * 3) : 0;
         v.target.position.y = VAULT_BOTTOM + 0.02 + targetH;
         (v.shell.material as THREE.MeshPhysicalMaterial).emissive.setHex(status === "failed" ? 0xff2a1a : 0x000000);
-        pouredShare += share * (v.level / Math.max(targetH, 1e-6));
+        pouredShare += v.level / MAX_FILL;
 
         // Liquid surface: a wobbling cap of metaballs on the column.
         if (v.level > 0.01) {
@@ -170,14 +187,15 @@ export function LiquidScene({ legs, execution }: { legs: Leg[]; execution: Execu
           }
         }
 
-        // Stream: droplets travelling from the mass into the vault while it fills.
+        // Stream: droplets travelling from the mass into the vault while it fills (reversed while it drains).
         const pouring = status === "flowing" || (status === "filled" && Math.abs(goal - v.level) > 0.02);
         if (pouring) {
           v.streamT += dt;
           const top = new THREE.Vector3(v.slot.x, VAULT_BOTTOM + VAULT_H + 0.15, 0);
           const ctrl = new THREE.Vector3(v.slot.x * 0.55, BLOB.y + 0.9, 0.2);
           for (let d = 0; d < 7; d++) {
-            const u = (v.streamT * 0.9 + d / 7) % 1;
+            const u0 = (v.streamT * 0.9 + d / 7) % 1;
+            const u = draining ? 1 - u0 : u0;
             const a = 1 - u;
             p.set(
               a * a * BLOB.x + 2 * a * u * ctrl.x + u * u * top.x,
@@ -198,7 +216,7 @@ export function LiquidScene({ legs, execution }: { legs: Leg[]; execution: Execu
         }
       }
 
-      // The body: a breathing chrome mass that shrinks as capital pours out of it.
+      // The body: a breathing chrome mass that shrinks as capital pours out of it (and grows as it comes back idle).
       const mass = Math.max(0.25, 1 - pouredShare * 0.75);
       for (let k = 0; k < 6; k++) {
         const a = t * 0.8 + k * 1.05;
@@ -231,17 +249,22 @@ export function LiquidScene({ legs, execution }: { legs: Leg[]; execution: Execu
       <div className="liquid-backdrop" aria-hidden />
       <div ref={mountRef} className="liquid-canvas" />
       <div className="liquid-title">
-        <div className="hud-title">T1000 // DEPLOYING CAPITAL</div>
+        <div className="hud-title">{from ? "T1000 // REBALANCING" : "T1000 // DEPLOYING CAPITAL"}</div>
         <div className="hud-sub">{execution?.mode === "live" ? "LIVE · MAINNET" : "SIMULATION · NOTHING IS SENT"}</div>
       </div>
       {SLOTS.map((slot, i) => {
         const leg = legs.find((l) => l.venue === slot.venue);
+        const before = from?.find((l) => l.venue === slot.venue);
         const { note } = vaultStatus(slot.venue, execution);
+        const moved = before && leg && Math.abs(before.usd - leg.usd) >= 0.01;
+        const amt = from
+          ? (moved ? `$${before.usd.toFixed(2)} → $${leg.usd.toFixed(2)}` : `$${(leg?.usd ?? 0).toFixed(2)}`)
+          : leg ? `${leg.pct}% · $${leg.usd.toFixed(2)}` : "0%";
         return (
           <div key={slot.venue} ref={(el) => { labelRefs.current[i] = el; }} className="liquid-label" style={{ color: slot.css }}>
             <div className="liquid-name">{VENUES[slot.venue].hud}</div>
-            <div className="liquid-amt">{leg ? `${leg.pct}% · $${leg.usd.toFixed(2)}` : "0%"}</div>
-            <div className="liquid-note">{leg ? note : "NOT IN PLAN"}</div>
+            <div className="liquid-amt">{amt}</div>
+            <div className="liquid-note">{from ? (moved ? note : "HOLD") : leg ? note : "NOT IN PLAN"}</div>
           </div>
         );
       })}

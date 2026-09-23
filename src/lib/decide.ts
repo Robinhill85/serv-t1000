@@ -133,15 +133,30 @@ function client() {
 }
 
 const VERIFY_INSTRUCTION =
-  "VERIFY MODE. `draft_decision` was produced for this exact input. Check it against every non-negotiable constraint and the decision policy. If it satisfies them, return it unchanged. If not, return a corrected decision and explain the correction in the summary.";
+  "VERIFY MODE. `draft` was produced for this exact input. Check it against every non-negotiable constraint and the policy. If it satisfies them, return it unchanged. If not, return a corrected version and explain the correction in the summary.";
 
-export async function decide(input: ReturnType<typeof decisionInput>, mode: DecideMode = "verified", draft?: Decision): Promise<DecideResult> {
-  // One retry: SERV occasionally returns an empty completion (seen once in 17 calls on 2026-09-22).
-  const first = await decideOnce(input, mode, draft);
-  return first.ok || !first.error?.startsWith("empty content") ? first : decideOnce(input, mode, draft);
+type ServCall<T> = {
+  system: string;
+  input: unknown;
+  schemaName: string;
+  schema: Record<string, unknown>;
+  parse: z.ZodType<T>;
+  shadowHint: string;
+  mode: DecideMode;
+  draft?: T;
+};
+export type ServResult<T> = { mode: DecideMode; model: string; ms: number; ok: boolean; value: T | null; error?: string; usage?: { input: number; output: number }; rawText?: string };
+
+/**
+ * One SERV Reasoning call with a strict JSON schema. fast = Multipath only; verified = Multipath + Prompt Guard +
+ * Shadow Agent (checks `draft` when given); raw = SERV disabled (benchmarks). Retries once on an empty completion.
+ */
+export async function servJson<T>(call: ServCall<T>): Promise<ServResult<T>> {
+  const first = await servOnce(call);
+  return first.ok || !first.error?.startsWith("empty content") ? first : servOnce(call);
 }
 
-async function decideOnce(input: ReturnType<typeof decisionInput>, mode: DecideMode, draft?: Decision): Promise<DecideResult> {
+async function servOnce<T>({ system, input, schemaName, schema, parse, shadowHint, mode, draft }: ServCall<T>): Promise<ServResult<T>> {
   const t0 = Date.now();
   const model = mode === "raw" ? BASE_MODEL : SERV_MODEL;
   try {
@@ -151,10 +166,7 @@ async function decideOnce(input: ReturnType<typeof decisionInput>, mode: DecideM
         type: "function" as const,
         function: {
           name: "serv_shadow_agent",
-          parameters: {
-            type: "object",
-            properties: { hint: { type: "string", default: SHADOW_HINT }, max_iterations: { type: "integer", default: 1 } },
-          },
+          parameters: { type: "object", properties: { hint: { type: "string", default: shadowHint }, max_iterations: { type: "integer", default: 1 } } },
         },
       },
     ];
@@ -163,10 +175,10 @@ async function decideOnce(input: ReturnType<typeof decisionInput>, mode: DecideM
         model,
         reasoning_effort: "low",
         messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: draft ? JSON.stringify({ instruction: VERIFY_INSTRUCTION, draft_decision: draft, ...input }) : JSON.stringify(input) },
+          { role: "system", content: system },
+          { role: "user", content: JSON.stringify(draft ? { instruction: VERIFY_INSTRUCTION, draft, input } : input) },
         ],
-        response_format: { type: "json_schema", json_schema: { name: "t1000_allocation", strict: true, schema: JSON_SCHEMA as unknown as Record<string, unknown> } },
+        response_format: { type: "json_schema", json_schema: { name: schemaName, strict: true, schema } },
         ...(mode === "verified" ? { tools: servTools as never } : {}),
       },
       mode === "raw" ? { headers: { "x-openserv-disable-braid": "true" } } : undefined,
@@ -176,12 +188,22 @@ async function decideOnce(input: ReturnType<typeof decisionInput>, mode: DecideM
     const usage = res.usage ? { input: res.usage.prompt_tokens, output: res.usage.completion_tokens } : undefined;
     if (!text.trim()) {
       const refusal = (choice?.message as { refusal?: string } | undefined)?.refusal;
-      return { mode, model, ms: Date.now() - t0, ok: false, decision: null, usage, error: `empty content (finish_reason=${choice?.finish_reason ?? "none"}${refusal ? `, refusal=${refusal}` : ""})`, rawText: JSON.stringify(res).slice(0, 1500) };
+      return { mode, model, ms: Date.now() - t0, ok: false, value: null, usage, error: `empty content (finish_reason=${choice?.finish_reason ?? "none"}${refusal ? `, refusal=${refusal}` : ""})`, rawText: JSON.stringify(res).slice(0, 1500) };
     }
-    const parsed = DecisionSchema.safeParse(JSON.parse(text));
-    if (!parsed.success) return { mode, model, ms: Date.now() - t0, ok: false, decision: null, error: "schema: " + parsed.error.issues[0]?.message, usage, rawText: text };
-    return { mode, model, ms: Date.now() - t0, ok: true, decision: parsed.data as Decision, usage };
+    const parsed = parse.safeParse(JSON.parse(text));
+    if (!parsed.success) return { mode, model, ms: Date.now() - t0, ok: false, value: null, error: "schema: " + parsed.error.issues[0]?.message, usage, rawText: text };
+    return { mode, model, ms: Date.now() - t0, ok: true, value: parsed.data, usage };
   } catch (e) {
-    return { mode, model, ms: Date.now() - t0, ok: false, decision: null, error: e instanceof Error ? e.message : String(e) };
+    return { mode, model, ms: Date.now() - t0, ok: false, value: null, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/** The allocation decision (plan). */
+export async function decide(input: ReturnType<typeof decisionInput>, mode: DecideMode = "verified", draft?: Decision): Promise<DecideResult> {
+  const r = await servJson<Decision>({
+    system: SYSTEM_PROMPT, input, schemaName: "t1000_allocation", schema: JSON_SCHEMA as unknown as Record<string, unknown>,
+    parse: DecisionSchema as unknown as z.ZodType<Decision>, shadowHint: SHADOW_HINT, mode, draft,
+  });
+  const { value, ...rest } = r;
+  return { ...rest, decision: value };
 }

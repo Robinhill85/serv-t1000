@@ -93,3 +93,14 @@ describe("checkExecutable", () => {
     expect(errs).toMatch(/not executable/);
   });
 });
+
+describe("per-chain funds", () => {
+  it("caps a venue at what its chain holds and blocks it when below the minimum", () => {
+    const funds = { ...open, chainFunds: { avalanche: 60, base: 200, robinhood: 20 } };
+    const e = eligibility({ ...uk, amountUsd: 150 }, funds);
+    expect(e.ixs.allowed).toBe(false); // $60 on Avalanche < $100 minimum
+    expect(e.ixs.reasons).toContain("NO_FUNDS_ON_CHAIN");
+    expect(e.rh_eth.maxPct).toBe(13); // floor(20 / 150 * 100)
+    expect(e.base.maxPct).toBe(100);
+  });
+});

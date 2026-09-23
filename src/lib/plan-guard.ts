@@ -1,7 +1,8 @@
 // Application-side guard: the last check between a model's decision and a signed transaction.
-import { VENUES, VENUE_IDS, type VenueId } from "./config";
+import { VENUES, VENUE_IDS, type ChainKey, type VenueId } from "./config";
+import { moveChain, type Move } from "./rebalance";
 import { LIQUIDITY_BUFFER_PCT, minPctFor, volatileCap } from "./rulebook";
-import type { Eligibility, Leg, Profile, Split } from "./types";
+import type { Eligibility, Leg, Position, Profile, Split } from "./types";
 
 type Elig = Record<VenueId, Eligibility>;
 
@@ -148,4 +149,58 @@ export function checkExecutable(legs: Leg[], profile: Profile, elig: Elig, limit
     if (l.usd <= 0) errors.push(`${v.hud} leg is not positive.`);
   }
   return errors;
+}
+
+// ---------- Guard-mode moves ----------
+
+export type MoveCheck = { executable: Move[]; deferred: Move[]; errors: string[] };
+
+/**
+ * Hard rules for a rebalance: same chain only (a venue <-> that chain's idle), amounts within the position or the
+ * chain's idle funds, the IXS minimums, no exit from an IXS deposit that is still settling, $5 floor, and the
+ * volatile share within its cap afterwards. Moves that need a bridge are deferred, never executed.
+ */
+export function checkMoves(
+  moves: Move[],
+  positions: Position[],
+  idleByChain: Partial<Record<ChainKey, number>>,
+  profile: Pick<Profile, "preference" | "risk">,
+  opts: { ixsRedeemMinUsd: number } = { ixsRedeemMinUsd: 0 },
+): MoveCheck {
+  const executable: Move[] = [];
+  const deferred: Move[] = [];
+  const errors: string[] = [];
+  const pos = new Map(positions.map((p) => [p.venue, p]));
+  const after = new Map(positions.map((p) => [p.venue, p.usd]));
+  const idle = { ...idleByChain };
+
+  for (const m of moves) {
+    const chain = moveChain(m);
+    if (m.bridge_required || chain == null) { deferred.push(m); continue; }
+    if (m.usd < 5) { errors.push(`Move of $${m.usd} is under the $5 floor.`); continue; }
+    const venue = (m.from === "idle" ? m.to : m.from) as VenueId;
+    if (!VENUES[venue].executable) { errors.push(`${VENUES[venue].hud} is not executable.`); continue; }
+    if (m.from !== "idle") {
+      const p = pos.get(venue);
+      if (!p || m.usd > p.usd * 1.005) { errors.push(`${VENUES[venue].hud}: move $${m.usd} exceeds the $${p?.usd ?? 0} position.`); continue; }
+      if (venue === "ixs" && p.status === "PENDING_T1") { errors.push("IXS deposit is still settling (T+1): nothing to redeem yet."); continue; }
+      if (venue === "ixs" && m.usd < opts.ixsRedeemMinUsd) { errors.push(`IXS exit $${m.usd} is under the $${opts.ixsRedeemMinUsd} minimum.`); continue; }
+      after.set(venue, (after.get(venue) ?? 0) - m.usd);
+      idle[chain] = (idle[chain] ?? 0) + m.usd;
+    } else {
+      if (m.usd > (idle[chain] ?? 0) + 0.01) { errors.push(`${VENUES[venue].hud}: only $${(idle[chain] ?? 0).toFixed(2)} idle on ${chain}.`); continue; }
+      if (venue === "ixs" && m.usd < VENUES.ixs.minUsd) { errors.push(`IXS deposit $${m.usd} is under the $${VENUES.ixs.minUsd} minimum.`); continue; }
+      after.set(venue, (after.get(venue) ?? 0) + m.usd);
+      idle[chain] = (idle[chain] ?? 0) - m.usd;
+    }
+    executable.push(m);
+  }
+
+  const total = [...after.values()].reduce((a, v) => a + Math.max(0, v), 0);
+  const vol = [...after.entries()].filter(([v]) => VENUES[v].kind === "volatile").reduce((a, [, v]) => a + Math.max(0, v), 0);
+  const cap = volatileCap(profile);
+  if (total > 0 && executable.length && (vol / total) * 100 > cap + 0.5) {
+    errors.push(`After these moves the volatile share would be ${((vol / total) * 100).toFixed(1)}%, over the ${cap}% cap.`);
+  }
+  return { executable, deferred, errors };
 }

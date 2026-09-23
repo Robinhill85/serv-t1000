@@ -6,6 +6,8 @@ import { jevScores, type JevResult } from "./jev";
 import { audit, enforce, toLegs } from "./plan-guard";
 import { eligibility, minPctFor, volatileCap } from "./rulebook";
 import { getSignals, type Signals } from "./signals";
+import { scanWallet } from "./scan";
+import type { ChainKey } from "./config";
 import type { Eligibility, Leg, Profile, Split } from "./types";
 
 export type PipelineEvent =
@@ -29,9 +31,17 @@ export async function runPipeline(profile: Profile, emit: (e: PipelineEvent) => 
   const signals = await getSignals(opts.agent, opts.now);
   emit({ type: "signals", signals });
 
+  // What the executing wallet holds per chain: v1 does not bridge, so each venue can only take its chain's funds.
+  let chainFunds: Partial<Record<ChainKey, number>> | undefined;
+  if (opts.agent) {
+    const { holdings } = await scanWallet(opts.agent);
+    chainFunds = {};
+    for (const h of holdings) if (h.stable) chainFunds[h.chain] = (chainFunds[h.chain] ?? 0) + h.amount;
+  }
   const elig = eligibility(profile, {
     ixs: { paused: signals.ixs.paused, whitelistEnabled: signals.ixs.whitelistEnabled, agentWhitelisted: signals.ixs.agentWhitelisted },
     usMarketOpen: signals.market.usMarketOpen,
+    chainFunds,
   });
   emit({ type: "eligibility", eligibility: elig });
 

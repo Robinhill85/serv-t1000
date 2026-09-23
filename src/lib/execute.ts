@@ -6,14 +6,15 @@
 //   execute()  sends them, leg by leg, through Coinbase AgentKit's ViemWalletProvider (each step and hash visible).
 //              Only reachable after checkExecutable() passes and the caller clears the route's own gates.
 import type { ViemWalletProvider } from "@coinbase/agentkit";
-import { buildApproveTx, buildRequestDepositTx, KNOWN_VAULTS } from "@ixswap1/vault-agent-sdk";
+import { buildApproveTx, buildRequestDepositTx, buildRequestRedeemTx, KNOWN_VAULTS } from "@ixswap1/vault-agent-sdk";
 import {
-  createWalletClient, encodeAbiParameters, encodeFunctionData, keccak256, maxUint256, numberToHex, pad, parseAbi, parseUnits,
+  createWalletClient, encodeAbiParameters, encodeFunctionData, formatUnits, keccak256, maxUint256, numberToHex, pad, parseAbi, parseUnits,
   type Abi, type Address, type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { CHAINS, TOKENS, UNISWAP_RH, VENUES, type ChainKey, type VenueId } from "./config";
 import { erc20Abi, publicClient, transport } from "./clients";
+import type { Move } from "./rebalance";
 import type { Leg } from "./types";
 
 export type Step = {
@@ -26,11 +27,15 @@ export type Step = {
   args: readonly unknown[];
   /** For steps that spend a token: the allowance the step relies on (overridden during simulation). */
   spends?: { token: Address; spender: Address; amount: bigint };
+  /** For steps that need the agent to hold a token (vault shares, WETH): injected in simulation if not yet held. */
+  holds?: { token: Address; amount: bigint };
 };
 
 export type StepResult = { venue: VenueId; chain: ChainKey; label: string; ok: boolean; detail: string; hash?: Hex; explorer?: string };
 
 const vaultDepositAbi = parseAbi(["function deposit(uint256 assets, address receiver) returns (uint256 shares)"]);
+const vaultWithdrawAbi = parseAbi(["function withdraw(uint256 assets, address receiver, address owner) returns (uint256 shares)"]);
+const vaultReadAbi = parseAbi(["function convertToShares(uint256) view returns (uint256)", "function decimals() view returns (uint8)", "function minRedeemAssets() view returns (uint256)"]);
 const quoterAbi = parseAbi([
   "function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) returns (uint256 amountOut,uint160,uint32,uint256)",
 ]);
@@ -101,6 +106,68 @@ export async function buildSteps(legs: Leg[], agent: Address): Promise<Step[]> {
   return steps;
 }
 
+/**
+ * Transactions for Guard-mode moves. Money going into a venue reuses the plan builders; money coming out uses
+ * Morpho withdraw, a WETH->USDG swap, or an IXS redeem request (settles T+1). Only same-chain moves reach here.
+ */
+export async function buildMoveSteps(moves: Move[], agent: Address, ethPriceUsd: number): Promise<Step[]> {
+  const steps: Step[] = [];
+  for (const m of moves) {
+    if (m.from === "idle" && m.to !== "idle") {
+      steps.push(...(await buildSteps([{ venue: m.to, pct: 0, usd: m.usd }], agent)));
+      continue;
+    }
+    if (m.from === "base") {
+      const amount = parseUnits(m.usd.toFixed(6), 6);
+      const shares = await publicClient("base").readContract({ address: VENUES.base.address!, abi: vaultReadAbi, functionName: "convertToShares", args: [amount] });
+      steps.push({
+        venue: "base", chain: "base", label: `Withdraw $${m.usd.toFixed(2)} from Gauntlet USDC Prime`, to: VENUES.base.address!, abi: vaultWithdrawAbi,
+        functionName: "withdraw", args: [amount, agent, agent], holds: { token: VENUES.base.address!, amount: (shares * 101n) / 100n },
+      });
+    } else if (m.from === "rh_eth") {
+      const wethIn = parseUnits((m.usd / ethPriceUsd).toFixed(18), 18);
+      const c = publicClient("robinhood");
+      const { result } = await c.simulateContract({
+        address: UNISWAP_RH.quoterV2, abi: quoterAbi, functionName: "quoteExactInputSingle",
+        args: [{ tokenIn: TOKENS.robinhood.WETH, tokenOut: TOKENS.robinhood.USDG, amountIn: wethIn, fee: UNISWAP_RH.wethUsdgFee, sqrtPriceLimitX96: 0n }],
+      });
+      const minOut = (result[0] * (10_000n - SWAP_SLIPPAGE_BPS)) / 10_000n;
+      steps.push(
+        { venue: "rh_eth", chain: "robinhood", label: "Approve WETH for the Uniswap router", to: TOKENS.robinhood.WETH, abi: erc20Abi as unknown as Abi, functionName: "approve", args: [UNISWAP_RH.swapRouter02, wethIn], holds: { token: TOKENS.robinhood.WETH, amount: wethIn } },
+        {
+          venue: "rh_eth", chain: "robinhood", label: `Trim ETH: swap ${(Number(wethIn) / 1e18).toFixed(6)} WETH for at least $${(Number(minOut) / 1e6).toFixed(2)} USDG`,
+          to: UNISWAP_RH.swapRouter02, abi: routerAbi, functionName: "exactInputSingle",
+          args: [{ tokenIn: TOKENS.robinhood.WETH, tokenOut: TOKENS.robinhood.USDG, fee: UNISWAP_RH.wethUsdgFee, recipient: agent, amountIn: wethIn, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n }],
+          spends: { token: TOKENS.robinhood.WETH, spender: UNISWAP_RH.swapRouter02, amount: wethIn },
+          holds: { token: TOKENS.robinhood.WETH, amount: wethIn },
+        },
+      );
+    } else if (m.from === "ixs") {
+      const vault = KNOWN_VAULTS["avax-ixhyb"];
+      const c = publicClient("avalanche");
+      const [shares, decimals] = await Promise.all([
+        c.readContract({ address: vault.address, abi: vaultReadAbi, functionName: "convertToShares", args: [parseUnits(m.usd.toFixed(6), 6)] }),
+        c.readContract({ address: vault.address, abi: vaultReadAbi, functionName: "decimals" }),
+      ]);
+      const tx = buildRequestRedeemTx(vault, agent, formatUnits(shares, decimals), decimals);
+      steps.push({
+        venue: "ixs", chain: "avalanche", label: `Request IXS exit of ~$${m.usd.toFixed(2)} (settles T+1, 0.5% fee)`, to: tx.address, abi: tx.abi as Abi,
+        functionName: tx.functionName, args: tx.args, holds: { token: vault.address as Address, amount: shares },
+      });
+    } else {
+      throw new Error(`Move ${m.from} -> ${m.to} is not executable.`);
+    }
+  }
+  return steps;
+}
+
+/** The IXS vault's live minimum exit, in USD. */
+export async function ixsRedeemMinUsd(): Promise<number> {
+  const c = publicClient("avalanche");
+  const min = await c.readContract({ address: KNOWN_VAULTS["avax-ixhyb"].address, abi: vaultReadAbi, functionName: "minRedeemAssets" }).catch(() => 0n);
+  return Number(formatUnits(min, 6));
+}
+
 // ERC-20 allowance storage slot discovery (Solidity mapping(address => mapping(address => uint256)) at an unknown slot).
 const slotCache = new Map<string, bigint>();
 function allowanceKey(owner: Address, spender: Address, slot: bigint): Hex {
@@ -124,6 +191,31 @@ async function findAllowanceSlot(chain: ChainKey, token: Address, owner: Address
   return null;
 }
 
+// ERC-20 balance storage slot discovery: mapping(address => uint256) at a plain slot, or OpenZeppelin v5's
+// ERC-7201 namespaced ERC20 storage (upgradeable vaults such as IXS).
+const OZ_ERC20_NAMESPACE = 0x52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace00n;
+const balanceSlotCache = new Map<string, bigint>();
+function balanceKey(owner: Address, slot: bigint): Hex {
+  return keccak256(encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [owner, slot]));
+}
+async function findBalanceSlot(chain: ChainKey, token: Address, owner: Address): Promise<bigint | null> {
+  const cacheKey = `${chain}:${token.toLowerCase()}`;
+  if (balanceSlotCache.has(cacheKey)) return balanceSlotCache.get(cacheKey)!;
+  const c = publicClient(chain);
+  const probe = 0x9876543210n;
+  const candidates = [OZ_ERC20_NAMESPACE, ...Array.from({ length: 64 }, (_, i) => BigInt(i))];
+  for (const slot of candidates) {
+    try {
+      const got = await c.readContract({
+        address: token, abi: erc20Abi, functionName: "balanceOf", args: [owner],
+        stateOverride: [{ address: token, stateDiff: [{ slot: balanceKey(owner, slot), value: pad(numberToHex(probe), { size: 32 }) }] }],
+      });
+      if (got === probe) { balanceSlotCache.set(cacheKey, slot); return slot; }
+    } catch { /* keep probing */ }
+  }
+  return null;
+}
+
 /** Simulates every step. Nothing is sent. Also checks the agent holds each leg's balance and gas. */
 export async function simulate(steps: Step[], agent: Address, onStep?: (r: StepResult) => void): Promise<StepResult[]> {
   const out: StepResult[] = [];
@@ -131,7 +223,8 @@ export async function simulate(steps: Step[], agent: Address, onStep?: (r: StepR
   for (const s of steps) {
     const c = publicClient(s.chain);
     try {
-      if (s.spends) {
+      // Spending a token the step also "holds" is covered by injection below; otherwise the agent must hold it.
+      if (s.spends && s.spends.token.toLowerCase() !== s.holds?.token.toLowerCase()) {
         const bal = await c.readContract({ address: s.spends.token, abi: erc20Abi, functionName: "balanceOf", args: [agent] });
         if (bal < s.spends.amount) {
           push({ venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: `Agent holds ${bal} base units, needs ${s.spends.amount}.` });
@@ -139,18 +232,35 @@ export async function simulate(steps: Step[], agent: Address, onStep?: (r: StepR
         }
       }
       let stateOverride: { address: Address; stateDiff: { slot: Hex; value: Hex }[] }[] | undefined;
+      let injected = false;
+      if (s.holds) {
+        const bal = await c.readContract({ address: s.holds.token, abi: erc20Abi, functionName: "balanceOf", args: [agent] });
+        if (bal < s.holds.amount) {
+          const slot = await findBalanceSlot(s.chain, s.holds.token, agent);
+          if (slot == null) {
+            push({ venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: "Agent holds no position here and it could not be injected for simulation." });
+            continue;
+          }
+          stateOverride = [{ address: s.holds.token, stateDiff: [{ slot: balanceKey(agent, slot), value: pad(numberToHex(s.holds.amount), { size: 32 }) }] }];
+          injected = true;
+        }
+      }
       if (s.spends) {
         const slot = await findAllowanceSlot(s.chain, s.spends.token, agent, s.spends.spender);
         if (slot == null) {
           push({ venue: s.venue, chain: s.chain, label: s.label, ok: true, detail: "Approval simulated; this step can only be simulated after the approval lands (allowance slot not found)." });
           continue;
         }
-        stateOverride = [{ address: s.spends.token, stateDiff: [{ slot: allowanceKey(agent, s.spends.spender, slot), value: pad(numberToHex(maxUint256), { size: 32 }) }] }];
+        const allowanceDiff = { slot: allowanceKey(agent, s.spends.spender, slot), value: pad(numberToHex(maxUint256), { size: 32 }) };
+        const same = stateOverride?.find((o) => o.address.toLowerCase() === s.spends!.token.toLowerCase());
+        if (same) same.stateDiff.push(allowanceDiff);
+        else stateOverride = [...(stateOverride ?? []), { address: s.spends.token, stateDiff: [allowanceDiff] }];
       }
       const data = encodeFunctionData({ abi: s.abi, functionName: s.functionName, args: s.args } as never);
       await c.call({ account: agent, to: s.to, data, stateOverride });
       const gas = await c.estimateGas({ account: agent, to: s.to, data, stateOverride }).catch(() => null);
-      push({ venue: s.venue, chain: s.chain, label: s.label, ok: true, detail: gas ? `Simulated OK, ~${gas} gas` : "Simulated OK" });
+      const note = injected ? " (position injected for simulation)" : "";
+      push({ venue: s.venue, chain: s.chain, label: s.label, ok: true, detail: (gas ? `Simulated OK, ~${gas} gas` : "Simulated OK") + note });
     } catch (e) {
       const msg = e instanceof Error ? (e as { shortMessage?: string }).shortMessage ?? e.message : String(e);
       push({ venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: msg.slice(0, 240) });

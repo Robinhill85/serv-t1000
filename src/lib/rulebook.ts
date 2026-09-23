@@ -1,11 +1,13 @@
 // Hard rules live in code (SERV "day one": exact business rules are not the model's job).
 // SERV reasons about weights inside these bounds; plan-guard re-checks them before any money moves.
-import { STOCK_TOKEN_EXCLUDED, VENUES, VENUE_IDS, type VenueId } from "./config";
-import type { Eligibility, Preference, Profile, ReasonCode, Risk } from "./types";
+import { STOCK_TOKEN_EXCLUDED, VENUES, VENUE_IDS, type ChainKey, type VenueId } from "./config";
+import type { Eligibility, Position, Preference, Profile, ReasonCode, Risk, Split, Trigger } from "./types";
 
 export type RuleInputs = {
   ixs: { paused: boolean; whitelistEnabled: boolean; agentWhitelisted: boolean };
   usMarketOpen: boolean;
+  /** Idle stablecoins the executing wallet holds per chain (USD). Omitted = not constrained (planning only). */
+  chainFunds?: Partial<Record<ChainKey, number>>;
 };
 
 const VOLATILE_CAP: Record<Preference, Record<Risk, number>> = {
@@ -54,6 +56,65 @@ export function eligibility(profile: Profile, inputs: RuleInputs): Record<VenueI
     out.rh_eth.reasons.push("VOLATILE_OPT_IN");
     if (out.rh_stocks.allowed) out.rh_stocks.maxPct = cap;
   }
+
+  // Funds live on specific chains and v1 does not bridge: a venue can only take what its chain holds.
+  if (inputs.chainFunds && profile.amountUsd > 0) {
+    for (const id of VENUE_IDS) {
+      if (!out[id].allowed || id === "rh_stocks") continue;
+      const funds = inputs.chainFunds[VENUES[id].chain] ?? 0;
+      if (funds < VENUES[id].minUsd) { block(id, "NO_FUNDS_ON_CHAIN"); continue; }
+      out[id].maxPct = Math.min(out[id].maxPct, Math.floor((funds / profile.amountUsd) * 100));
+      if (out[id].maxPct < 100) out[id].reasons.push("NO_FUNDS_ON_CHAIN");
+    }
+  }
+  return out;
+}
+
+export const DRIFT_PP = 5;
+export const NEW_CASH_USD = 20;
+export const YIELD_GAP_PP = 1;
+
+/**
+ * Guard triggers. Pure code: the model never decides whether something fired.
+ * positions: current value per venue; targets: the plan's split; idle*: idle stables now / at deploy.
+ */
+export function triggers(input: {
+  positions: Position[];
+  targets: Split;
+  profile: Pick<Profile, "preference" | "risk">;
+  baseApyPct: number | null;
+  ixsYieldPct: number;
+  ixs: { paused: boolean; whitelistEnabled: boolean; agentWhitelisted: boolean; navFresh: boolean | null };
+  idleNowUsd: number;
+  idleAtDeployUsd: number;
+}): Trigger[] {
+  const out: Trigger[] = [];
+  const held = input.positions.filter((p) => p.usd > 0);
+  const total = held.reduce((a, p) => a + p.usd, 0);
+  if (total > 0) {
+    for (const p of input.positions) {
+      const w = (p.usd / total) * 100;
+      const t = input.targets[p.venue] ?? 0;
+      if (Math.abs(w - t) > DRIFT_PP) {
+        out.push({ code: "DRIFT", venue: p.venue, detail: `${VENUES[p.venue].hud} ${w.toFixed(1)}% vs target ${t}%` });
+      }
+    }
+    const cap = volatileCap(input.profile);
+    const vol = input.positions.filter((p) => VENUES[p.venue].kind === "volatile").reduce((a, p) => a + p.usd, 0);
+    const volPct = (vol / total) * 100;
+    if (volPct > cap + 0.5) out.push({ code: "DRIFT", detail: `Volatile share ${volPct.toFixed(1)}% over the ${cap}% cap` });
+  }
+  const holdsIxs = input.positions.some((p) => p.venue === "ixs" && p.usd > 0);
+  if (holdsIxs && input.baseApyPct != null && input.ixsYieldPct - input.baseApyPct < YIELD_GAP_PP) {
+    out.push({ code: "YIELD_GAP", venue: "ixs", detail: `IXS ${input.ixsYieldPct}% vs Base ${input.baseApyPct}%: gap under ${YIELD_GAP_PP}pp` });
+  }
+  if (holdsIxs) {
+    if (input.ixs.paused) out.push({ code: "VAULT_RULE", venue: "ixs", detail: "IXS vault paused" });
+    if (input.ixs.whitelistEnabled && !input.ixs.agentWhitelisted) out.push({ code: "VAULT_RULE", venue: "ixs", detail: "IXS whitelist switched on" });
+    if (input.ixs.navFresh === false) out.push({ code: "VAULT_RULE", venue: "ixs", detail: "IXS NAV is stale" });
+  }
+  const fresh = input.idleNowUsd - input.idleAtDeployUsd;
+  if (fresh >= NEW_CASH_USD) out.push({ code: "NEW_CASH", detail: `$${fresh.toFixed(2)} new idle stables since deploy` });
   return out;
 }
 
