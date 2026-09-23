@@ -117,15 +117,16 @@ async function findAllowanceSlot(chain: ChainKey, token: Address, owner: Address
 }
 
 /** Simulates every step. Nothing is sent. Also checks the agent holds each leg's balance and gas. */
-export async function simulate(steps: Step[], agent: Address): Promise<StepResult[]> {
+export async function simulate(steps: Step[], agent: Address, onStep?: (r: StepResult) => void): Promise<StepResult[]> {
   const out: StepResult[] = [];
+  const push = (r: StepResult) => { out.push(r); onStep?.(r); };
   for (const s of steps) {
     const c = publicClient(s.chain);
     try {
       if (s.spends) {
         const bal = await c.readContract({ address: s.spends.token, abi: erc20Abi, functionName: "balanceOf", args: [agent] });
         if (bal < s.spends.amount) {
-          out.push({ venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: `Agent holds ${bal} base units, needs ${s.spends.amount}.` });
+          push({ venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: `Agent holds ${bal} base units, needs ${s.spends.amount}.` });
           continue;
         }
       }
@@ -133,7 +134,7 @@ export async function simulate(steps: Step[], agent: Address): Promise<StepResul
       if (s.spends) {
         const slot = await findAllowanceSlot(s.chain, s.spends.token, agent, s.spends.spender);
         if (slot == null) {
-          out.push({ venue: s.venue, chain: s.chain, label: s.label, ok: true, detail: "Approval simulated; this step can only be simulated after the approval lands (allowance slot not found)." });
+          push({ venue: s.venue, chain: s.chain, label: s.label, ok: true, detail: "Approval simulated; this step can only be simulated after the approval lands (allowance slot not found)." });
           continue;
         }
         stateOverride = [{ address: s.spends.token, stateDiff: [{ slot: allowanceKey(agent, s.spends.spender, slot), value: pad(numberToHex(maxUint256), { size: 32 }) }] }];
@@ -141,10 +142,10 @@ export async function simulate(steps: Step[], agent: Address): Promise<StepResul
       const data = encodeFunctionData({ abi: s.abi, functionName: s.functionName, args: s.args } as never);
       await c.call({ account: agent, to: s.to, data, stateOverride });
       const gas = await c.estimateGas({ account: agent, to: s.to, data, stateOverride }).catch(() => null);
-      out.push({ venue: s.venue, chain: s.chain, label: s.label, ok: true, detail: gas ? `Simulated OK, ~${gas} gas` : "Simulated OK" });
+      push({ venue: s.venue, chain: s.chain, label: s.label, ok: true, detail: gas ? `Simulated OK, ~${gas} gas` : "Simulated OK" });
     } catch (e) {
       const msg = e instanceof Error ? (e as { shortMessage?: string }).shortMessage ?? e.message : String(e);
-      out.push({ venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: msg.slice(0, 240) });
+      push({ venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: msg.slice(0, 240) });
     }
   }
   return out;

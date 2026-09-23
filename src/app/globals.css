@@ -254,3 +254,24 @@ html, body { height: 100%; background: #000; color: var(--chat-text); font-famil
   .hud-result { top: 58px; }
   .hud-title { font-size: 15px; }
 }
+
+/* ---------- liquid vault scene (takes over the visual panel during a run) ---------- */
+.liquid-layer { position: absolute; inset: 0; z-index: 20; animation: liquid-in 0.8s ease-out both; }
+@keyframes liquid-in { from { opacity: 0; filter: brightness(2) saturate(0); } to { opacity: 1; filter: none; } }
+.liquid { position: absolute; inset: 0; overflow: hidden; background: #06070a; font-family: var(--font-hud), ui-monospace, monospace; text-transform: uppercase; color: var(--ir-white); }
+.liquid-backdrop {
+  position: absolute; inset: -4%; background: url("/intro/vault-backdrop.jpg") center 35% / cover no-repeat;
+  filter: blur(7px) brightness(0.42) saturate(1.15);
+}
+.liquid-backdrop::after { content: ""; position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 40%, transparent 30%, rgba(0, 0, 0, 0.75) 100%); }
+.liquid-canvas { position: absolute; inset: 0; }
+.liquid-canvas canvas { width: 100% !important; height: 100% !important; display: block; }
+.liquid-title { position: absolute; top: 18px; left: 22px; z-index: 2; }
+.liquid-label {
+  position: absolute; z-index: 2; transform: translate(-50%, 0); text-align: center; white-space: nowrap;
+  text-shadow: 0 0 10px rgba(0, 0, 0, 0.9); font-size: clamp(11px, 1.4cqw, 16px); line-height: 1.15;
+}
+.liquid-name { font-size: 1em; }
+.liquid-amt { font-size: 1.35em; color: #fff; }
+.liquid-note { font-size: 0.9em; opacity: 0.85; }
+.liquid-preview { position: fixed; inset: 0; container: hud / size; }

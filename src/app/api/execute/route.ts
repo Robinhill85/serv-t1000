@@ -64,8 +64,7 @@ export async function POST(req: Request) {
         send({ type: "steps", steps: steps.map((x) => ({ venue: x.venue, chain: x.chain, label: x.label })) });
         let results: StepResult[];
         if (mode === "simulate") {
-          results = await simulate(steps, agent);
-          for (const r of results) send({ type: "step", result: r });
+          results = await simulate(steps, agent, (r) => send({ type: "step", result: r }));
         } else {
           results = await execute(steps, (r) => send({ type: "step", result: r }));
         }
