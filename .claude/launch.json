@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "serv-t1000",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "/Users/robin/Documents/projects/serv-t1000",
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "3200"
+      ],
+      "port": 3200
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+
+T-800 raw: 2/24 answers broke a rule, 2 violations, median 3.4s
+   profile 5 (US stable/low instant): split sums to 80%
+   profile 0 (UK mixed/medium): split sums to 200%
+
+T-1000 serv: 1/24 answers broke a rule, 1 violations, median 15.3s
+   profile 2 (EU volatile/high): IXS RWA VAULT below its $100 minimum

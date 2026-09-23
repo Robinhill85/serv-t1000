@@ -1,0 +1,6 @@
+raw (T-800)      9.2s stop len=3162 | 6.5s stop len=3206
+serv plain       8.5s stop len=3655 | 11.6s stop len=5961
+serv +guard      10.3s stop len=3444 | 13.6s stop len=4904
+serv multipath   7.2s stop len=2343 | 7.8s stop len=3015
+serv +shadow     19.8s stop len=3737 | 25.8s stop len=3374
+serv full        18.6s stop len=2967 | 22.8s stop len=4018

@@ -1,0 +1,119 @@
+
+=== uk-locked (+T-800)
+signals {"market":"after hours","base":{"status":"LIVE","netApyPct":4.44,"tvlUsd":415843768},"ixs":{"st":"LIVE","wl":false,"fee":50},"rhEth":{"status":"LIVE","priceUsd":2750.58,"poolUsdgDepth":12922874,"change7dPct":14.72}}
+blocked rh_stocks:JURISDICTION
+jev LIVE 619ms base_stable_yield=Good(2.02) ixs_rwa_yield=Good(1.72) rh_eth_entry_risk=High(1.87) rh_pricing_reliable=YES(0.71) stock_pricing_reliable=NO(0.48) goal_intent=earn_yield(0.82)
+decision gpt-5.4-mini-serv-multipath 2329ms ok=false err=Unexpected end of JSON input
+   violations: no decision 
+t800 gpt-5.4-mini 7074ms ok=true
+     BASE LIQUIDITY                   fit 74 {"ixs":34,"base":66,"rh_eth":0,"rh_stocks":0}
+   > CORE IXS BALANCE                 fit 88 {"ixs":60,"base":40,"rh_eth":0,"rh_stocks":0}
+     IXS CORE + ETH TILT              fit 63 {"ixs":55,"base":35,"rh_eth":10,"rh_stocks":0}
+     MAX UPSIDE MIX                   fit 41 {"ixs":50,"base":30,"rh_eth":20,"rh_stocks":0}
+   summary: For a 6-month hold with no instant-access need, the allocation leans into IXS because its 6.00% estimated yield beats Base’s 4.44% by 1.56 points. Base stays at 40% to preserve instant liquidity, and stocks are excluded while ETH is left out because the risk is only medium and RH ETH entry risk is High.
+   cites: ixs: ixs estYieldPct is 6 vs base netApyPct 4.44, a 1.56 pp edge | ixs: horizon is "3_12m" and instant_access is false | ixs: ixs status is "LIVE" and navFresh is true | base: base netApyPct is 4.44 | base: eligibility reasons include "INSTANT_LIQUIDITY" | base: the split keeps 40% in base for same-day access
+   violations: none 
+ERROR Unexpected end of JSON input
+
+=== uk-instant (+T-800)
+signals {"market":"after hours","base":{"status":"LIVE","netApyPct":4.44,"tvlUsd":415843768},"ixs":{"st":"LIVE","wl":false,"fee":50},"rhEth":{"status":"LIVE","priceUsd":2750.5,"poolUsdgDepth":12919417,"change7dPct":14.72}}
+blocked ixs:SETTLEMENT_TOO_SLOW rh_eth:STABLE_ONLY rh_stocks:JURISDICTION
+jev LIVE 668ms base_stable_yield=Good(2.34) ixs_rwa_yield=Fair(0.64) rh_eth_entry_risk=High(2.31) rh_pricing_reliable=YES(0.71) stock_pricing_reliable=NO(0.46) goal_intent=preserve(1.00)
+decision gpt-5.4-mini-serv-multipath 81456ms ok=true
+   > BASE EMERGENCY 100               fit 99 {"ixs":0,"base":100,"rh_eth":0,"rh_stocks":0}
+     BASE ONLY DEFENSIVE              fit 97 {"ixs":0,"base":100,"rh_eth":0,"rh_stocks":0}
+     BASE MAX LIQUIDITY               fit 95 {"ixs":0,"base":100,"rh_eth":0,"rh_stocks":0}
+   summary: The full allocation goes to Base because it is the only eligible venue and it offers instant withdrawal for an emergency fund. The other venues are blocked by settlement, stable-only, and jurisdiction constraints, so no split away from Base is executable.
+   cites: base: Base is allowed with max_pct 100 and min_pct 1. | base: Base net APY is 4.44% and the user says they may need it back any day.
+   violations: none 
+t800 gpt-5.4-mini 4796ms ok=true
+   > EMERGENCY CASH                   fit 99 {"ixs":0,"base":100,"rh_eth":0,"rh_stocks":0}
+     LIQUIDITY FIRST                  fit 98 {"ixs":0,"base":100,"rh_eth":0,"rh_stocks":0}
+     YIELD NOT CHASED                 fit 96 {"ixs":0,"base":100,"rh_eth":0,"rh_stocks":0}
+   summary: I’m placing the full $300 in Base USDC lending for instant access and stable exposure. The other venues are blocked or unsuitable for an emergency fund, so there is no split away from Base.
+   cites: base: instant_access is true | base: profile.preference is "stable" | base: base netApyPct is 4.44 and JEV base_stable_yield confidence is 0.34, so I lean on the raw signal
+   violations: none 
+plan [{"venue":"base","pct":100,"usd":300}] 
+
+=== eu-locked (+T-800)
+signals {"market":"after hours","base":{"status":"LIVE","netApyPct":4.44,"tvlUsd":415843768},"ixs":{"st":"LIVE","wl":false,"fee":50},"rhEth":{"status":"LIVE","priceUsd":2750.6,"poolUsdgDepth":12923932,"change7dPct":14.72}}
+blocked rh_stocks:NOT_EXECUTABLE_V1
+jev LIVE 603ms base_stable_yield=Good(1.82) ixs_rwa_yield=Good(1.70) rh_eth_entry_risk=High(1.93) rh_pricing_reliable=YES(0.70) stock_pricing_reliable=NO(0.49) goal_intent=grow(0.97)
+decision gpt-5.4-mini-serv-multipath 20348ms ok=true
+     CORE STABLE WITH CASH BUFFER     fit 78 {"ixs":80,"base":20,"rh_eth":0,"rh_stocks":0}
+     BALANCED GROWTH MIX              fit 87 {"ixs":70,"base":10,"rh_eth":20,"rh_stocks":0}
+   > VOLATILE LEAN-IN                 fit 92 {"ixs":67,"base":1,"rh_eth":32,"rh_stocks":0}
+   summary: I chose a growth-leaning split that keeps the required stable core in IXS, a tiny Base liquidity buffer, and the rest in rh_eth within the 60% volatile cap. Robinhood stock tokens are excluded because they are not executable here.
+   cites: ixs: estYieldPct is 6 versus base netApyPct 4.44 | ixs: minUsd is 100 and the amount is 150, so 67% is the minimum non-zero stable leg | base: base netApyPct is 4.44 | base: instant_access is false, but Base remains the instant-withdrawal buffer | rh_eth: volatile cap pct is 60 | rh_eth: rh_eth min_pct is 4 and its entry risk is labeled High with value 1.93/3 | rh_stocks: allowed is false | rh_stocks: first reason code is NOT_EXECUTABLE_V1 and market is after hours with usMarketOpen false
+   violations: none 
+t800 gpt-5.4-mini 8117ms ok=true
+     DEFENSIVE GROWTH                 fit 76 {"ixs":67,"base":33,"rh_eth":0,"rh_stocks":0}
+     BALANCED UPSIDE                  fit 86 {"ixs":67,"base":20,"rh_eth":13,"rh_stocks":0}
+   > GROWTH TILT                      fit 88 {"ixs":70,"base":20,"rh_eth":10,"rh_stocks":0}
+     MAX VOL TILT                     fit 81 {"ixs":67,"base":13,"rh_eth":20,"rh_stocks":0}
+   summary: I chose a growth-tilted split that keeps 70% in the higher-yield licensed RWA vault, 20% in liquid USDC lending, and 10% in ETH for upside. Stock tokens are blocked, and the ETH slice is kept modest because Jev rates entry risk High at 1.93/3.
+   cites: ixs: IXS estYieldPct is '6' vs base netApyPct '4.44' | ixs: settlement is 'async ERC-7540: T+1, T+2 over weekends' | ixs: exitFeeBps is '50' | base: base netApyPct is '4.44' | base: base status is 'LIVE' and eligibility says 'INSTANT_LIQUIDITY' | rh_eth: rh_eth status is 'LIVE' with priceUsd '2750.6' | rh_eth: Jev entry risk is 'High' with value '1.93 of 3' and confidence '0.8' | rh_eth: volatile_cap_pct is '60'
+   violations: none 
+plan [{"venue":"ixs","pct":67,"usd":100.5},{"venue":"base","pct":1,"usd":1.5},{"venue":"rh_eth","pct":32,"usd":48}] 
+
+=== eu-instant (+T-800)
+signals {"market":"after hours","base":{"status":"LIVE","netApyPct":4.44,"tvlUsd":415842737},"ixs":{"st":"LIVE","wl":false,"fee":50},"rhEth":{"status":"LIVE","priceUsd":2750.6,"poolUsdgDepth":12924061,"change7dPct":14.72}}
+blocked ixs:SETTLEMENT_TOO_SLOW rh_stocks:NOT_EXECUTABLE_V1
+jev LIVE 596ms base_stable_yield=Good(2.13) ixs_rwa_yield=Fair(1.43) rh_eth_entry_risk=High(1.79) rh_pricing_reliable=YES(0.75) stock_pricing_reliable=NO(0.49) goal_intent=earn_yield(1.00)
+decision gpt-5.4-mini-serv-multipath 38486ms ok=true
+   > BASE ONLY                        fit 92 {"ixs":0,"base":100,"rh_eth":0,"rh_stocks":0}
+     BASE PLUS SMALL ETH              fit 84 {"ixs":0,"base":95,"rh_eth":5,"rh_stocks":0}
+     BASE PLUS ETH TILT               fit 76 {"ixs":0,"base":90,"rh_eth":10,"rh_stocks":0}
+     MAX VOLATILE CAP                 fit 68 {"ixs":0,"base":80,"rh_eth":20,"rh_stocks":0}
+   summary: I chose 100% in Base because it is live, pays 4.44% net APY, and matches the instant-access, short-horizon profile. I blocked IXS because it is not allowed for this run, and I left stock tokens at 0% because they are not executable right now.
+   cites: base: Base netApyPct is 4.44% and status is LIVE. | base: The base Jev score is 2.13 of 3 with confidence 0.59.
+   violations: none 
+t800 gpt-5.4-mini 6091ms ok=true
+   > BASE_SAFE                        fit 92 {"ixs":0,"base":100,"rh_eth":0,"rh_stocks":0}
+     BASE_PLUS_SMALL_ETH              fit 70 {"ixs":0,"base":95,"rh_eth":5,"rh_stocks":0}
+     BASE_PLUS_VOL_CAP                fit 48 {"ixs":0,"base":80,"rh_eth":20,"rh_stocks":0}
+   summary: The safest fit for your 1_3 month horizon is 100% in Base for instant liquidity and steady yield. IXS is unavailable here, and ETH is optional but not needed unless you want to take on more volatility.
+   cites: base: Profile instant_access is true. | base: Base netApyPct is 4.44% vs ixs estYieldPct of 6%, but ixs is not eligible and horizon is 1_3m where the policy favors base unless the ixs edge is large. | rh_eth: rh_eth max_pct is 20% and volatile_cap_pct is 20%. | rh_eth: Jev rh_eth_entry_risk is 'High' with value 1.79/3 and confidence 0.77, so any ETH sleeve should be kept small.
+   violations: none 
+plan [{"venue":"base","pct":100,"usd":500}] 
+
+=== us-locked (+T-800)
+signals {"market":"after hours","base":{"status":"LIVE","netApyPct":4.44,"tvlUsd":415842737},"ixs":{"st":"LIVE","wl":false,"fee":50},"rhEth":{"status":"LIVE","priceUsd":2751.44,"poolUsdgDepth":12960497,"change7dPct":14.72}}
+blocked rh_stocks:JURISDICTION
+jev LIVE 616ms base_stable_yield=Good(1.97) ixs_rwa_yield=Good(1.52) rh_eth_entry_risk=High(1.93) rh_pricing_reliable=YES(0.75) stock_pricing_reliable=NO(0.46) goal_intent=speculate(1.00)
+decision gpt-5.4-mini-serv-multipath 49647ms ok=true
+     STABLE TILT                      fit 52 {"ixs":60,"base":40,"rh_eth":0,"rh_stocks":0}
+     BALANCED SPEC                    fit 77 {"ixs":46,"base":34,"rh_eth":20,"rh_stocks":0}
+   > MAX VOLATILE                     fit 90 {"ixs":34,"base":20,"rh_eth":46,"rh_stocks":0}
+   summary: I chose the most aggressive allowed split that still keeps the required 20% base buffer for the long horizon with no instant access. Stock tokens are blocked here, so the allocation stays within the allowed venues and respects every limit.
+   cites: ixs: ixs estYieldPct is 6 | ixs: ixs minUsd is 100 | ixs: ixs exitFeeBps is 50 | base: base netApyPct is 4.44 | base: base tvlUsd is 415842737 | rh_eth: rh_eth priceUsd is 2751.44 | rh_eth: rh_eth change7dPct is 14.72 | rh_eth: rh_eth entry risk confidence is 0.66 | rh_stocks: usMarketOpen is false | rh_stocks: stocks oracleState is feeds live (24/5 extended session)
+   violations: none 
+t800 gpt-5.4-mini 6298ms ok=true
+     CORE STABLE                      fit 82 {"ixs":60,"base":40,"rh_eth":0,"rh_stocks":0}
+     BALANCED BARBELL                 fit 88 {"ixs":50,"base":30,"rh_eth":20,"rh_stocks":0}
+   > GROWTH MIX                       fit 94 {"ixs":40,"base":20,"rh_eth":40,"rh_stocks":0}
+     MAX VOL TILT                     fit 91 {"ixs":34,"base":20,"rh_eth":46,"rh_stocks":0}
+   summary: This split keeps the higher-yield ixs vault as the core, preserves the required 20% base liquidity buffer, and adds ETH exposure within the 60% volatile cap. Robinhood stock tokens are excluded because they are not eligible here, so I did not route any funds there.
+   cites: ixs: ixs estYieldPct is '6' vs base netApyPct '4.44' | ixs: horizon is 'over_1y' and ixs settlement is 'T+1, T+2 over weekends' | ixs: IXS High Yield Corporate Bond Vault is licensed RWA and allowed=true | base: profile instant_access is 'false', so base is used as liquidity buffer rather than the core | base: base netApyPct is '4.44' with status 'LIVE' | rh_eth: profile preference is 'volatile' and volatile cap is '60' | rh_eth: Jev rh_eth_entry_risk is 'High' with value '1.93' and confidence '0.66'
+   violations: none 
+plan [{"venue":"ixs","pct":34,"usd":102},{"venue":"base","pct":20,"usd":60},{"venue":"rh_eth","pct":46,"usd":138}] 
+
+=== us-instant (+T-800)
+signals {"market":"after hours","base":{"status":"LIVE","netApyPct":4.44,"tvlUsd":415842737},"ixs":{"st":"LIVE","wl":false,"fee":50},"rhEth":{"status":"LIVE","priceUsd":2750.72,"poolUsdgDepth":12928702,"change7dPct":14.72}}
+blocked ixs:SETTLEMENT_TOO_SLOW rh_eth:STABLE_ONLY rh_stocks:JURISDICTION
+jev LIVE 601ms base_stable_yield=Good(2.42) ixs_rwa_yield=Poor(0.05) rh_eth_entry_risk=High(2.15) rh_pricing_reliable=YES(0.67) stock_pricing_reliable=NO(0.47) goal_intent=preserve(1.00)
+decision gpt-5.4-mini-serv-multipath 41617ms ok=true
+   > BASE 100 SAFE                    fit 100 {"ixs":0,"base":100,"rh_eth":0,"rh_stocks":0}
+     BASE 100 YIELD                   fit 97 {"ixs":0,"base":100,"rh_eth":0,"rh_stocks":0}
+     BASE 100 DEFENSIVE               fit 95 {"ixs":0,"base":100,"rh_eth":0,"rh_stocks":0}
+   summary: Allocate the full $80 to Base, since it is the only eligible venue and it matches the user's safe, liquid objective. The chosen split is valid, fully liquid, and supported by the cited base yield and market size signals.
+   cites: base: base netApyPct 4.44 | base: base tvlUsd 415842737 | base: jev base_stable_yield 2.42 | base: jev base_stable_yield confidence 0.42
+   violations: none 
+t800 gpt-5.4-mini 3771ms ok=true
+   > CASH HARBOR                      fit 99 {"ixs":0,"base":100,"rh_eth":0,"rh_stocks":0}
+     LIQUID SAFETY                    fit 97 {"ixs":0,"base":100,"rh_eth":0,"rh_stocks":0}
+     MAX LIQUIDITY                    fit 95 {"ixs":0,"base":100,"rh_eth":0,"rh_stocks":0}
+   summary: All $80 goes to Base because you asked to keep it safe and liquid, and Base is the only eligible instant-withdrawal stable venue. IXS is blocked, and the Robinhood venues are excluded, so there is no compliant non-base allocation.
+   cites: base: profile.instant_access is true | base: base.netApyPct is 4.44% versus ixs.estYieldPct at 6% | base: profile.horizon is under_1m | base: goal_intent is preserve
+   violations: none 
+plan [{"venue":"base","pct":100,"usd":80}] 
