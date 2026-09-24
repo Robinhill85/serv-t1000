@@ -25,7 +25,10 @@ const OUT = opt("--out") || A("cut", "t1000-demo-rough.mp4");
 const WORK = A("cut", "work");
 fs.mkdirSync(WORK, { recursive: true });
 
-const ff = (args) => execFileSync("ffmpeg", ["-v", "error", "-y", ...args], { stdio: "inherit" });
+const ff = (args) => {
+  if (process.env.BUILD_DEBUG) fs.writeFileSync(path.join(WORK, "last-ffmpeg.json"), JSON.stringify(args, null, 1));
+  return execFileSync("ffmpeg", ["-v", "error", "-y", ...args], { stdio: "inherit" });
+};
 const dur = (f) => +execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", f]).toString().trim();
 
 // Take 3 source ranges (seconds) and playback speed. The two SERV waits run 5x; everything the viewer reads runs 1x.
@@ -41,6 +44,28 @@ const SEGMENTS = [
   { from: 70.0, to: 81.0, speed: 5 }, //  Shadow Agent verifying the moves
   { from: 81.0, to: 96.7, speed: 1 }, //  proposal, simulate moves, reverse flow, all clear
 ];
+// Live proof (first live run, 24 Sep), cut in after the simulated deploy and before the end card.
+// Robin's own screen recording (1988x1080): 6px white top border cropped, letterboxed to 1920x1080, the Next.js
+// dev badge (bottom-left) covered with the scene's near-black (delogo smeared it red).
+const ROBIN_LIVE = "/Users/robin/Downloads/take1.mp4";
+const PROOF = A("takes", "proof");
+const INSERTS = [
+  {
+    afterSeg: 5,
+    clips: [
+      { src: ROBIN_LIVE, from: 61.9, to: 66.4, speed: 1, vf: "crop=1988:1074:0:6,scale=1920:-2,pad=1920:1080:0:(oh-ih)/2,drawbox=x=0:y=984:w=78:h=76:color=0x0d0b0b@1:t=fill" },
+      { still: path.join(PROOF, "explorer.png"), dur: 3.0 },
+    ],
+    captions: [{ t: [0.1, 4.4], text: "Live on mainnet · $105 into the IXS vault" }, { t: [4.6, 7.4], text: "Real tx on Avalanche · success" }],
+  },
+  {
+    afterSeg: 9,
+    clips: [{ src: path.join(PROOF, "guard.mp4"), from: 0.3, to: 4.2, speed: 1 }],
+    captions: [{ t: [0.1, 3.8], text: "Live now · $150 across 3 chains · onchain" }],
+  },
+];
+const clipLen = (c) => (c.still ? c.dur : (c.to - c.from) / c.speed); // on the 1x timeline
+
 const XFADE = 0.9 / PACE; // pupil opening into the HUD
 const END_CARD = PACE > 1 ? 3.8 : 4.8;
 
@@ -104,17 +129,43 @@ async function renderStills(bodyEnd) {
 }
 
 (async () => {
-  // 1. Body: cut and retime take segments, then join.
-  const segFiles = SEGMENTS.map((s, i) => {
+  // 1. Body: take segments with the live-proof inserts interleaved, each cut, retimed and encoded alike.
+  const plan = [];
+  SEGMENTS.forEach((sg, i) => {
+    plan.push(sg);
+    for (const ins of INSERTS.filter((x) => x.afterSeg === i)) plan.push(...ins.clips);
+  });
+  const segFiles = plan.map((c, i) => {
     const f = path.join(WORK, `seg_${i}.mp4`);
-    ff(["-ss", String(s.from), "-to", String(s.to), "-i", TAKE, "-an", "-vf", `setpts=(PTS-STARTPTS)/${s.speed * PACE},fps=30,format=yuv420p`, "-c:v", "libx264", "-crf", "15", "-preset", "medium", f]);
+    if (process.env.REUSE_SEGS && fs.existsSync(f)) return f;
+    const enc = ["-an", "-c:v", "libx264", "-crf", "15", "-preset", "medium", "-pix_fmt", "yuv420p", f];
+    if (c.still) {
+      const n = Math.round((c.dur / PACE) * 30);
+      ff(["-loop", "1", "-framerate", "30", "-t", String(c.dur / PACE), "-i", c.still, "-vf",
+        `scale=3840:-1,zoompan=z='1+0.06*on/${n}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1920x1080:fps=30`, ...enc]);
+    } else {
+      const pre = c.vf ? `${c.vf},` : "";
+      ff(["-ss", String(c.from), "-to", String(c.to), "-i", c.src ?? TAKE, "-vf", `${pre}setpts=(PTS-STARTPTS)/${c.speed * PACE},fps=30,format=yuv420p`, ...enc]);
+    }
     return f;
   });
-  const list = path.join(WORK, "segs.txt");
-  fs.writeFileSync(list, segFiles.map((f) => `file '${f}'`).join("\n") + "\n");
+  // Join by decoding (concat filter): stream-copy joins broke at the seam where clips from other encoders begin.
   const body = path.join(WORK, "body.mp4");
-  ff(["-f", "concat", "-safe", "0", "-i", list, "-c", "copy", body]);
+  ff([...segFiles.flatMap((f) => ["-i", f]), "-filter_complex",
+    segFiles.map((_, i) => `[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=30,format=yuv420p[s${i}]`).join(";") + ";" + segFiles.map((_, i) => `[s${i}]`).join("") + `concat=n=${segFiles.length}:v=1:a=0[v]`,
+    "-map", "[v]", "-c:v", "libx264", "-crf", "14", "-preset", "medium", "-pix_fmt", "yuv420p", body]);
   const introLen = dur(INTRO) / PACE;
+  // Map original 1x timeline times past the inserts, then to the paced timeline.
+  const bodyStart1x = dur(INTRO) - 0.9;
+  const insAt = INSERTS.map((ins) => bodyStart1x + SEGMENTS.slice(0, ins.afterSeg + 1).reduce((a, sg) => a + (sg.to - sg.from) / sg.speed, 0));
+  const insLen = INSERTS.map((ins) => ins.clips.reduce((a, c) => a + clipLen(c), 0));
+  const shift1x = (t) => t + INSERTS.reduce((a, _, k) => a + (t >= insAt[k] - 0.05 ? insLen[k] : 0), 0);
+  const at = (t) => shift1x(t) / PACE;
+  const insertCaptions = INSERTS.flatMap((ins, k) => {
+    const start = insAt[k] + insLen.slice(0, k).reduce((a, x) => a + x, 0);
+    return ins.captions.map((c) => ({ t: [start + c.t[0], start + c.t[1]], text: c.text, placed: true }));
+  });
+  CAPTIONS.push(...insertCaptions);
   const bodyLen = dur(body);
   const bodyStart = introLen - XFADE;
   const bodyEnd = bodyStart + bodyLen;
@@ -130,37 +181,50 @@ async function renderStills(bodyEnd) {
   let g = `[0:v]setpts=PTS/${PACE},fps=30,format=yuv420p,settb=AVTB[i];[1:v]settb=AVTB[b];[2:v]fps=30,format=yuv420p,settb=AVTB[e];`;
   g += `[i][b]xfade=transition=circleopen:duration=${XFADE}:offset=${bodyStart.toFixed(3)}[ib];`;
   g += `[ib][e]xfade=transition=fade:duration=0.6:offset=${(bodyEnd - 0.6).toFixed(3)}[v0];`;
-  CAPTIONS.forEach((c, i) => { g += `[v${i}][${3 + i}:v]overlay=0:0:enable='between(t,${(c.t[0] / PACE).toFixed(3)},${(c.t[1] / PACE).toFixed(3)})'[v${i + 1}];`; });
+  CAPTIONS.forEach((c, i) => {
+    const [a, b] = c.placed ? [c.t[0] / PACE, c.t[1] / PACE] : [at(c.t[0]), at(c.t[1])];
+    g += `[v${i}][${3 + i}:v]overlay=0:0:enable='between(t,${a.toFixed(3)},${b.toFixed(3)})'[v${i + 1}];`;
+  });
   const vOut = `v${CAPTIONS.length}`;
 
-  // 4. Audio: each VO line cut from Arthur's read and placed on its beat; optional music bed ducked under the voice.
-  const voFiles = [...new Set(VO_LINES.map((l) => l.file))];
-  const voIdxOf = (f) => 3 + caps.length + voFiles.indexOf(f);
-  voFiles.forEach((f) => inputs.push("-i", f));
-  VO_LINES.forEach((l, k) => {
-    const at = l.beat === "end" ? bodyEnd - 0.6 + 0.45 : VO_AT[l.beat] / PACE;
+  // 4. Audio, in separate passes (one graph splitting a shared VO stream nine ways deadlocked once the cut grew):
+  //    each line to its own file -> voice track -> music ducked under it -> loudness. The video pass only muxes.
+  const lineFiles = VO_LINES.map((l, k) => {
+    const f = path.join(WORK, `vo_${k}.wav`);
     const len = (l.end - l.start + 0.02) / PACE;
-    g += `[${voIdxOf(l.file)}:a]atrim=start=${Math.max(0, l.start - 0.05)}:end=${l.end + 0.12},asetpts=PTS-STARTPTS,atempo=${PACE},afade=t=out:st=${len.toFixed(3)}:d=0.1,adelay=delays=${Math.round(at * 1000)}:all=1[vo${k}];`;
+    ff(["-i", l.file, "-af", `atrim=start=${Math.max(0, l.start - 0.05)}:end=${l.end + 0.12},asetpts=PTS-STARTPTS,atempo=${PACE},afade=t=out:st=${len.toFixed(3)}:d=0.1,aformat=sample_rates=48000:channel_layouts=stereo`, f]);
+    return f;
   });
-  g += VO_LINES.map((_, k) => `[vo${k}]`).join("") + `amix=inputs=${VO_LINES.length}:normalize=0,apad,atrim=end=${total.toFixed(3)},aformat=channel_layouts=stereo[voice];`;
-  let aOut = "voice";
+  const voice = path.join(WORK, "voice.wav");
+  {
+    let vg = "";
+    VO_LINES.forEach((l, k) => {
+      const start = l.beat === "end" ? bodyEnd - 0.6 + 0.45 : at(VO_AT[l.beat]);
+      vg += `[${k}:a]adelay=delays=${Math.round(start * 1000)}:all=1[d${k}];`;
+    });
+    vg += VO_LINES.map((_, k) => `[d${k}]`).join("") + `amix=inputs=${VO_LINES.length}:normalize=0:duration=longest,apad=whole_dur=${total.toFixed(3)},atrim=end=${total.toFixed(3)}[out]`;
+    ff([...lineFiles.flatMap((f) => ["-i", f]), "-filter_complex", vg, "-map", "[out]", voice]);
+  }
+  const mix = path.join(WORK, "mix.wav");
   if (MUSIC) {
-    const mIdx = 3 + caps.length + voFiles.length;
-    inputs.push("-i", MUSIC);
-    // Music carries the intro, then sits low; the sidechain ducks it further whenever Arthur speaks.
-    g += `[voice]asplit=2[voice1][key];`;
     // Measured: voice ~-15 dB mean, this track ~-11 dB once its percussion enters. Intro 0.6 (music leads);
     // a 1.5s ramp down to 0.14 puts the bed ~15 dB under the voice, and the sidechain dips it further on every line.
     const t0 = bodyStart.toFixed(2);
-    g += `[${mIdx}:a]aformat=channel_layouts=stereo,atrim=end=${total.toFixed(3)},volume='if(lt(t,${t0}),0.6,if(lt(t,${t0}+1.5),0.6-0.46*(t-${t0})/1.5,0.14))':eval=frame,afade=t=out:st=${(total - 2.5).toFixed(2)}:d=2.5[bed];`;
-    g += `[bed][key]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=400[ducked];`;
-    g += `[voice1][ducked]amix=inputs=2:normalize=0[mix];`;
-    aOut = "mix";
+    const mg = `[1:a]aformat=sample_rates=48000:channel_layouts=stereo,atrim=end=${total.toFixed(3)},volume='if(lt(t,${t0}),0.6,if(lt(t,${t0}+1.5),0.6-0.46*(t-${t0})/1.5,0.14))':eval=frame,afade=t=out:st=${(total - 2.5).toFixed(2)}:d=2.5[bed];` +
+      `[0:a]asplit=2[v1][key];[bed][key]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=400[ducked];` +
+      `[v1][ducked]amix=inputs=2:normalize=0:duration=first,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000[out]`;
+    ff(["-i", voice, "-i", MUSIC, "-filter_complex", mg, "-map", "[out]", mix]);
+  } else {
+    ff(["-i", voice, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000", mix]);
   }
-  g += `[${aOut}]loudnorm=I=-16:TP=-1.5:LRA=11[aout]`;
+  inputs.push("-i", mix);
+  const aIdx = 3 + caps.length;
+  g = g.replace(/;$/, "");
 
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
-  ff([...inputs, "-filter_complex", g, "-map", `[${vOut}]`, "-map", "[aout]", "-t", total.toFixed(3),
-    "-c:v", "libx264", "-crf", "17", "-preset", "slow", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", OUT]);
+  const finalArgs = [...inputs, "-filter_complex", g, "-map", `[${vOut}]`, "-map", `${aIdx}:a`, "-t", total.toFixed(3),
+    "-c:v", "libx264", "-crf", "17", "-preset", "slow", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", OUT];
+  if (process.env.BUILD_DEBUG) fs.writeFileSync(path.join(WORK, "final-ffmpeg.json"), JSON.stringify(finalArgs));
+  ff(finalArgs);
   console.log(`wrote ${OUT} (${dur(OUT).toFixed(2)}s)`);
 })().catch((e) => { console.error(e.message); process.exit(1); });
