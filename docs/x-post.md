@@ -1,4 +1,4 @@
-# X submission post (draft v1)
+# X submission post (draft v2: try it with your own wallet)
 
 Thread of 5. Attach `assets/cut/t1000-demo-final.mp4` to tweet 1. All tweets fit 280 characters (links count as 23).
 Optional image on tweet 3: the Guard onchain screenshot (`assets/takes/proof/guard.mp4` frame).
@@ -11,9 +11,9 @@ Your idle stablecoins are sitting there doing nothing.
 
 So I built T1000 for the @openservai SERV hackathon.
 
-It decides where they should live, deploys them across 3 chains, then keeps guarding them.
+It decides where they should live, deploys them from your own wallet across 3 chains, then keeps guarding them.
 
-$150 already went live on mainnet. Here's how it works:
+Try it yourself, link below.
 
 **2/**
 
@@ -21,7 +21,7 @@ $150 already went live on mainnet. Here's how it works:
 
 2. SERV Reasoning drafts the split. A Shadow Agent checks it before any money moves.
 
-3. AgentKit executes: IXS RWA vault (Avalanche), USDC lending (Base), ETH (Robinhood Chain).
+3. You sign each step: IXS RWA vault (Avalanche), USDC lending (Base), ETH (Robinhood Chain).
 
 **3/**
 
@@ -37,12 +37,12 @@ Biggest lesson building it:
 
 Let the model reason. Let code enforce.
 
-UK user? Stock tokens are blocked in code, not by a prompt. IXS $100 minimum, same. Every tx gets simulated before it's sent.
+UK user? Stock tokens are blocked in code, not by a prompt. No gas on a chain? Blocked. Every tx is simulated from your wallet before you sign.
 
 SERV picks the split. The rules can't be talked out of.
 
 **5/**
 
-Try it (free simulation, no wallet connect): https://serv-t1000.vercel.app
+Try it with your own wallet, or as a free simulation: https://serv-t1000.vercel.app
 Code: https://github.com/Robinhill85/serv-t1000
-Live proof, the $105 IXS deposit: https://snowtrace.io/tx/0xfde6acee579dd1ba72c892cdd2818630f8fac66ebabc445b9becaa1095f2f818
+Live proof, $105 into the IXS vault: https://snowtrace.io/tx/0xfde6acee579dd1ba72c892cdd2818630f8fac66ebabc445b9becaa1095f2f818

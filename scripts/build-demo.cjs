@@ -116,11 +116,11 @@ async function renderStills(bodyEnd) {
     h1{margin:0;font-size:230px;line-height:.9;font-weight:400;color:#ff3b1f;text-shadow:0 0 40px rgba(255,59,31,.55)}
     .s{font-size:64px;margin-top:18px}
     .r{font-size:44px;margin-top:34px;color:rgba(255,232,224,.86)}
-    .u{font-size:56px;margin-top:40px;padding:6px 22px;border:3px solid #fff3ee}
+    .u{font-size:52px;margin-top:40px;padding:8px 24px;border:3px solid #fff3ee;background:rgba(255,59,31,.18)}
   </style></head><body><div class="bg"></div><div class="v"></div><div class="c">
     <h1>T1000</h1><div class="s">Idle stablecoins · allocated · guarded</div>
-    <div class="r">Reasoning: SERV · Execution: AgentKit · IXS · Base · Robinhood Chain</div>
-    <div class="u">serv-t1000.vercel.app</div></div></body></html>`, { waitUntil: "networkidle" });
+    <div class="r">SERV reasoning · Jev by TypeSafe · IXS · Base · Robinhood Chain</div>
+    <div class="u">Try it with your own wallet · serv-t1000.vercel.app</div></div></body></html>`, { waitUntil: "networkidle" });
   await page.evaluate(() => document.fonts.ready);
   const card = path.join(WORK, "endcard.png");
   await page.screenshot({ path: card });
