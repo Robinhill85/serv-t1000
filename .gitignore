@@ -21,3 +21,6 @@ assets/vo/
 assets/takes/
 assets/cut/
 assets/music/
+
+# local security audit reports
+.gstack/
