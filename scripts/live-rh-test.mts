@@ -179,6 +179,12 @@ async function snapshot() {
 const fmt = (s: Awaited<ReturnType<typeof snapshot>>) =>
   `WETH ${formatUnits(s.weth, 18)} · USDG ${formatUnits(s.usdg, 6)} (Robinhood) · Morpho shares ${formatUnits(s.shares, 18)} · USDC ${formatUnits(s.usdc, 6)} (Base)`;
 
+/** Gas limit with headroom: Morpho's gas use varies, and viem's bare estimate left only 1.4% spare on 24 Sep. */
+async function withHeadroom(key: ChainKey, req: { address: Address; abi: readonly unknown[]; functionName: string; args: readonly unknown[] }) {
+  const est = await publicClient(key).estimateContractGas({ account, ...req } as never);
+  return (est * 13n) / 10n + 20_000n;
+}
+
 /** Undoes what the run added, directly from this wallet (not through the site): exact deltas only. */
 async function cleanup(before: Awaited<ReturnType<typeof snapshot>>) {
   const now = await snapshot();
@@ -195,20 +201,23 @@ async function cleanup(before: Awaited<ReturnType<typeof snapshot>>) {
     const w = walletFor("robinhood");
     const allowance = await rh.readContract({ address: TOKENS.robinhood.WETH, abi: erc20Abi, functionName: "allowance", args: [agent, UNISWAP_RH.swapRouter02] });
     if (allowance < wethIn) {
-      const h = await w.writeContract({ account, chain: CHAINS.robinhood.chain, address: TOKENS.robinhood.WETH, abi: approveAbi, functionName: "approve", args: [UNISWAP_RH.swapRouter02, wethIn] });
+      const req = { address: TOKENS.robinhood.WETH, abi: approveAbi, functionName: "approve", args: [UNISWAP_RH.swapRouter02, wethIn] } as const;
+      const h = await w.writeContract({ account, chain: CHAINS.robinhood.chain, ...req, gas: await withHeadroom("robinhood", req) });
       log(`cleanup: approve ${(await rh.waitForTransactionReceipt({ hash: h })).status} ${CHAINS.robinhood.explorer}/tx/${h}`);
     }
-    const h = await w.writeContract({
-      account, chain: CHAINS.robinhood.chain, address: UNISWAP_RH.swapRouter02, abi: swapAbi, functionName: "exactInputSingle",
+    const sell = {
+      address: UNISWAP_RH.swapRouter02, abi: swapAbi, functionName: "exactInputSingle",
       args: [{ tokenIn: TOKENS.robinhood.WETH, tokenOut: TOKENS.robinhood.USDG, fee: UNISWAP_RH.wethUsdgFee, recipient: agent, amountIn: wethIn, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n }],
-    });
+    } as const;
+    const h = await w.writeContract({ account, chain: CHAINS.robinhood.chain, ...sell, gas: await withHeadroom("robinhood", sell) });
     log(`cleanup: sell ${(await rh.waitForTransactionReceipt({ hash: h })).status} ${CHAINS.robinhood.explorer}/tx/${h}`);
   }
   if (shares > 0n) {
     const base = publicClient("base");
     const assets = await base.readContract({ address: MORPHO, abi: vaultAbi, functionName: "convertToAssets", args: [shares] });
     log(`cleanup: redeeming the ${formatUnits(shares, 18)} Morpho shares this run added (~${formatUnits(assets, 6)} USDC)`);
-    const h = await walletFor("base").writeContract({ account, chain: CHAINS.base.chain, address: MORPHO, abi: vaultAbi, functionName: "redeem", args: [shares, agent, agent] });
+    const req = { address: MORPHO, abi: vaultAbi, functionName: "redeem", args: [shares, agent, agent] } as const;
+    const h = await walletFor("base").writeContract({ account, chain: CHAINS.base.chain, ...req, gas: await withHeadroom("base", req) });
     log(`cleanup: redeem ${(await base.waitForTransactionReceipt({ hash: h })).status} ${CHAINS.base.explorer}/tx/${h}`);
   }
   if (wethIn <= 0n && shares <= 0n) log("cleanup: nothing landed, nothing to undo");
@@ -291,5 +300,5 @@ try {
 }
 
 if (EXECUTE && !arg("no-cleanup")) await cleanup(before).catch((e) => log("cleanup FAILED:", e instanceof Error ? e.message.split("\n")[0] : e));
-if (EXECUTE) log(`after:  ${fmt(await snapshot())}`);
+if (EXECUTE) { await new Promise((r) => setTimeout(r, 4000)); log(`after:  ${fmt(await snapshot())} (read 4s after cleanup; RPC nodes can lag a block)`); }
 process.exit(ok ? 0 : 1);
