@@ -47,7 +47,7 @@ const SEGMENTS = [
 // Live proof (first live run, 24 Sep), cut in after the simulated deploy and before the end card.
 // Robin's own screen recording (1988x1080): 6px white top border cropped, letterboxed to 1920x1080, the Next.js
 // dev badge (bottom-left) covered with the scene's near-black (delogo smeared it red).
-const ROBIN_LIVE = "/Users/robin/Downloads/take1.mp4";
+const ROBIN_LIVE = process.env.LIVE_CLIP || A("takes", "live", "robin-live-take1.mp4");
 const PROOF = A("takes", "proof");
 const INSERTS = [
   {
