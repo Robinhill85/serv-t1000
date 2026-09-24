@@ -5,7 +5,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { avalanche, base } from "viem/chains";
-import { createConfig, http, WagmiProvider } from "wagmi";
+import { createConfig, fallback, http, WagmiProvider } from "wagmi";
 import { coinbaseWallet, injected } from "wagmi/connectors";
 import { robinhood } from "@/lib/config";
 
@@ -16,8 +16,10 @@ export const wagmiConfig = createConfig({
     coinbaseWallet({ version: "4", appName: "T1000", preference: "eoaOnly" }),
   ],
   // Public RPCs only: receipts and allowance checks from the browser. Robinhood Chain's public RPC serves eth_call.
+  // Base: mainnet.base.org first. publicnode rejects receipt lookups ("Invalid parameters"), which broke the first
+  // real wallet run (24 Sep) after the approval was already sent.
   transports: {
-    [base.id]: http("https://base-rpc.publicnode.com"),
+    [base.id]: fallback([http("https://mainnet.base.org"), http("https://base-rpc.publicnode.com")]),
     [avalanche.id]: http("https://api.avax.network/ext/bc/C/rpc"),
     [robinhood.id]: http("https://rpc.mainnet.chain.robinhood.com"),
   },

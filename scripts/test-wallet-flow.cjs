@@ -29,6 +29,7 @@ const MOCK = (user) => {
         }
         case "wallet_addEthereumChain": { const id = params[0].chainId.toLowerCase(); known.add(id); chainId = id; emit("chainChanged", id); return null; }
         case "eth_sendTransaction": { n += 1; return "0x" + "ab".repeat(30) + n.toString(16).padStart(4, "0"); }
+        case "eth_getTransactionReceipt": return { status: "0x1", transactionHash: params[0] }; // the wallet's own RPC
         case "wallet_getPermissions": case "wallet_requestPermissions": return [{ parentCapability: "eth_accounts" }];
         default: throw Object.assign(new Error(`mock: ${method} unsupported`), { code: 4200 });
       }
@@ -50,9 +51,12 @@ const MOCK = (user) => {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   await ctx.addInitScript(MOCK, USER);
   // Fake receipts for the fake hashes, and a max allowance so the approval wait doesn't stall; the rest is real.
-  await ctx.route(/publicnode\.com|api\.avax\.network|rpc\.mainnet\.chain\.robinhood\.com/, async (route) => {
+  // RECEIPT_VIA_WALLET=1: public RPCs fail receipt lookups (like Base publicnode on 24 Sep); only the wallet answers.
+  const viaWallet = process.env.RECEIPT_VIA_WALLET === "1";
+  await ctx.route(/publicnode\.com|mainnet\.base\.org|api\.avax\.network|rpc\.mainnet\.chain\.robinhood\.com/, async (route) => {
     const body = route.request().postDataJSON?.();
     const one = (m) => {
+      if (m?.method === "eth_getTransactionReceipt" && viaWallet) return { jsonrpc: "2.0", id: m.id, error: { code: -32602, message: "Invalid parameters were provided to the RPC method." } };
       if (m?.method === "eth_getTransactionReceipt" && String(m.params?.[0]).startsWith("0x" + "ab".repeat(30))) {
         return { jsonrpc: "2.0", id: m.id, result: {
           transactionHash: m.params[0], transactionIndex: "0x0", blockHash: "0x" + "11".repeat(32), blockNumber: "0x1", from: USER, to: USER,
