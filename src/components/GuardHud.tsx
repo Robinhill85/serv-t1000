@@ -85,7 +85,7 @@ export function GuardHud({ guard }: { guard: GuardView }) {
           <div className="hud-sub">MODE: {mode}</div>
         </div>
         <div className="hud-right">
-          <div className="hud-label">SOURCE: {session.source === "live" ? "AGENT WALLET · ONCHAIN" : "SIMULATED POSITIONS"}</div>
+          <div className="hud-label">SOURCE: {session.source === "live" ? (session.address ? "YOUR WALLET · ONCHAIN" : "AGENT WALLET · ONCHAIN") : "SIMULATED POSITIONS"}</div>
           <div><span className="guard-src-short">{session.source === "live" ? "ONCHAIN" : "SIMULATED"} · </span>NEXT SCAN {countdown}</div>
           {session.scenario && <div className="guard-tag">SCENARIO: ETH {session.scenario.ethMult >= 1 ? "+" : ""}{Math.round((session.scenario.ethMult - 1) * 100)}%</div>}
         </div>

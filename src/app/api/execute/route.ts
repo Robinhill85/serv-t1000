@@ -2,7 +2,7 @@
 // mode "live": also requires EXECUTION_ENABLED=true and the LIVE_PASSCODE, then sends through the agent wallet.
 // Both modes re-check the plan against fresh signals and the rulebook first.
 import { z } from "zod";
-import { executionLimits } from "@/lib/config";
+import { executionLimits, type ChainKey } from "@/lib/config";
 import { agentAddress, buildMoveSteps, buildSteps, execute, ixsRedeemMinUsd, simulate, type Step, type StepResult } from "@/lib/execute";
 import { guardState } from "@/lib/guard";
 import { checkExecutable, checkMoves } from "@/lib/plan-guard";
@@ -10,6 +10,7 @@ import { passcodeOk, verifyMoves, verifyPlan } from "@/lib/plan-token";
 import { GuardRequestSchema, ProfileSchema } from "@/lib/profile-schema";
 import { MOVE_ENDS } from "@/lib/rebalance";
 import { eligibility } from "@/lib/rulebook";
+import { scanWallet } from "@/lib/scan";
 import { getSignals } from "@/lib/signals";
 
 export const runtime = "nodejs";
@@ -58,7 +59,8 @@ function stream(run: (send: (e: ExecuteEvent) => void) => Promise<void>) {
 async function runSteps(steps: Step[], agent: `0x${string}`, mode: "simulate" | "live", send: (e: ExecuteEvent) => void) {
   send({ type: "steps", steps: steps.map((x) => ({ venue: x.venue, chain: x.chain, label: x.label })) });
   if (mode === "simulate") {
-    const results = await simulate(steps, agent, (r) => send({ type: "step", result: r }));
+    // Demo simulations top up balances the agent wallet lacks (and say so); the live pre-flight below never does.
+    const results = await simulate(steps, agent, (r) => send({ type: "step", result: r }), { injectBalances: true });
     send({ type: "done", mode, ok: results.every((r) => r.ok) });
     return;
   }
@@ -82,6 +84,7 @@ function liveGate(passcode: string | undefined): string | null {
 
 async function postMoves(body: z.infer<typeof MovesBody>) {
   const { mode, moves, guard, iat, planToken, passcode } = body;
+  if (guard.address) return Response.json({ error: "Moves for your own wallet are signed in your wallet (/api/wallet-steps)." }, { status: 400 });
   const tokenError = verifyMoves({ moves, source: guard.source, scenario: !!guard.scenario }, iat, planToken);
   if (tokenError) return Response.json({ error: tokenError }, { status: 403 });
   if (mode === "live") {
@@ -124,9 +127,16 @@ export async function POST(req: Request) {
   return stream(async (send) => {
     const agent = agentAddress();
     const s = await getSignals(agent);
+    // Live: each leg must fit what the agent wallet holds on its chain (demo plans are planned uncapped).
+    let chainFunds: Partial<Record<ChainKey, number>> | undefined;
+    if (mode === "live") {
+      chainFunds = {};
+      for (const h of (await scanWallet(agent)).holdings) if (h.stable) chainFunds[h.chain] = (chainFunds[h.chain] ?? 0) + h.amount;
+    }
     const elig = eligibility(profile, {
       ixs: { paused: s.ixs.paused, whitelistEnabled: s.ixs.whitelistEnabled, agentWhitelisted: s.ixs.agentWhitelisted },
       usMarketOpen: s.market.usMarketOpen,
+      chainFunds,
     });
     // Simulation is allowed with the kill switch off; every other rule applies to both modes.
     const errors = checkExecutable(legs, profile, elig, { ...limits, enabled: mode === "simulate" ? true : limits.enabled });

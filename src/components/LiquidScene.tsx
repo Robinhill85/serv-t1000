@@ -250,7 +250,7 @@ export function LiquidScene({ legs, execution, from }: { legs: Leg[]; execution:
       <div ref={mountRef} className="liquid-canvas" />
       <div className="liquid-title">
         <div className="hud-title">{from ? "T1000 // REBALANCING" : "T1000 // DEPLOYING CAPITAL"}</div>
-        <div className="hud-sub">{execution?.mode === "live" ? "LIVE · MAINNET" : "SIMULATION · NOTHING IS SENT"}</div>
+        <div className="hud-sub">{execution?.mode === "live" ? (execution.by === "wallet" ? "LIVE · YOUR WALLET" : "LIVE · MAINNET") : "SIMULATION · NOTHING IS SENT"}</div>
       </div>
       {SLOTS.map((slot, i) => {
         const leg = legs.find((l) => l.venue === slot.venue);

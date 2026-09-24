@@ -1,7 +1,8 @@
 import { defineChain, type Address, type Chain } from "viem";
 import { avalanche, base } from "viem/chains";
 
-// Robinhood Chain (Arbitrum Orbit L2). Public RPC answers eth_chainId but 403s eth_call, so reads go through Alchemy.
+// Robinhood Chain (Arbitrum Orbit L2). Server reads go through Alchemy; since 24 Sep the public RPC also serves
+// eth_call and eth_estimateGas, which user wallets need.
 export const robinhood = defineChain({
   id: 4663,
   name: "Robinhood Chain",
@@ -20,6 +21,18 @@ export const CHAINS: Record<ChainKey, { chain: Chain; alchemy: string; publicRpc
   avalanche: { chain: avalanche, alchemy: "avax-mainnet", publicRpcs: ["https://api.avax.network/ext/bc/C/rpc"], explorer: "https://snowtrace.io" },
   robinhood: { chain: robinhood, alchemy: "robinhood-mainnet", explorer: "https://robinhoodchain.blockscout.com" },
 };
+
+/** Native gas a wallet needs on a chain before T1000 plans a leg there (about 10x a four-transaction leg). */
+export const GAS_MIN: Record<ChainKey, number> = { base: 0.00005, avalanche: 0.002, robinhood: 0.00005 };
+export const GAS_SYMBOL: Record<ChainKey, string> = { base: "ETH", avalanche: "AVAX", robinhood: "ETH" };
+
+/** "My wallet" mode: anyone signs from their own wallet. Kill switch + per-run cap (defaults: on, $500). */
+export function publicLimits() {
+  return {
+    enabled: process.env.PUBLIC_WALLET_ENABLED !== "false",
+    maxRunUsd: Number(process.env.PUBLIC_MAX_RUN_USD ?? 500),
+  };
+}
 
 export function rpcUrl(key: ChainKey): string {
   const apiKey = process.env.ALCHEMY_API_KEY;

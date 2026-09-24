@@ -34,6 +34,7 @@ export const REASON_CODES = [
   "NOT_EXECUTABLE_V1",
   "LOW_SCORE",
   "NO_FUNDS_ON_CHAIN",
+  "NO_GAS_ON_CHAIN",
 ] as const;
 export type ReasonCode = (typeof REASON_CODES)[number];
 

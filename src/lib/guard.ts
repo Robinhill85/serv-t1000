@@ -1,4 +1,5 @@
 // Guard state on the server: positions (real or projected), triggers, and idle funds by chain.
+import type { Address } from "viem";
 import type { ChainKey } from "./config";
 import { agentAddress } from "./execute";
 import { projectPositions, readAgentPositions, type Entry, type Scenario } from "./positions";
@@ -13,6 +14,7 @@ export type GuardRequest = {
   legs: Leg[];
   entry: Entry;
   scenario: Scenario;
+  address?: string;
 };
 export type GuardState = {
   source: "simulated" | "live";
@@ -29,7 +31,7 @@ export type GuardState = {
 };
 
 export async function guardState(req: GuardRequest): Promise<GuardState> {
-  const agent = agentAddress();
+  const agent = (req.address as Address | undefined) ?? agentAddress();
   const [s, scan] = await Promise.all([getSignals(agent), scanWallet(agent)]);
   const idleByChain: Partial<Record<ChainKey, number>> = {};
   for (const h of scan.holdings) if (h.stable) idleByChain[h.chain] = Math.round(((idleByChain[h.chain] ?? 0) + h.amount) * 100) / 100;

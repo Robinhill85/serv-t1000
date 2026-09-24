@@ -1,9 +1,9 @@
 // The full think step: signals -> rulebook -> Jev -> SERV decision -> guard. Emits events for the HUD as it goes.
 import type { Address } from "viem";
-import { VENUE_IDS, type VenueId } from "./config";
+import { GAS_SYMBOL, VENUE_IDS, type VenueId } from "./config";
 import { decide, decisionInput, type DecideResult } from "./decide";
 import { jevScores, type JevResult } from "./jev";
-import { audit, enforce, toLegs } from "./plan-guard";
+import { audit, checkExecutable, enforce, toLegs } from "./plan-guard";
 import { eligibility, minPctFor, volatileCap } from "./rulebook";
 import { getSignals, type Signals } from "./signals";
 import { scanWallet } from "./scan";
@@ -16,10 +16,15 @@ export type PipelineEvent =
   | { type: "jev"; jev: JevResult }
   | { type: "decision_fast"; result: DecideResult; violations: string[]; split: Split | null; legs: Leg[] }
   | { type: "decision_verified"; result: DecideResult; violations: string[]; revised: boolean }
-  | { type: "plan"; split: Split; legs: Leg[]; adjustments: string[]; verified: boolean }
+  | { type: "plan"; split: Split; legs: Leg[]; adjustments: string[]; verified: boolean; blocked: string[] }
   | { type: "error"; message: string };
 
-export type PipelineOptions = { agent?: Address; now?: Date };
+/**
+ * agent: the executing wallet for signals (e.g. the IXS whitelist check).
+ * fundsFrom: plan within what this wallet holds per chain, and its gas ("My wallet" mode); omit for demo plans.
+ * limits: checked against the final plan when fundsFrom is set, so an unfundable split shows before any signing.
+ */
+export type PipelineOptions = { agent?: Address; fundsFrom?: Address; limits?: { enabled: boolean; maxRunUsd: number }; now?: Date };
 
 function chosenSplit(r: DecideResult): Split | null {
   const d = r.decision;
@@ -31,17 +36,24 @@ export async function runPipeline(profile: Profile, emit: (e: PipelineEvent) => 
   const signals = await getSignals(opts.agent, opts.now);
   emit({ type: "signals", signals });
 
-  // What the executing wallet holds per chain: v1 does not bridge, so each venue can only take its chain's funds.
+  // "My wallet" mode: v1 does not bridge, so each venue can only take what the wallet holds on its chain, and only
+  // where it has gas. Demo plans are not capped (their simulations top balances up and say so).
   let chainFunds: Partial<Record<ChainKey, number>> | undefined;
-  if (opts.agent) {
-    const { holdings } = await scanWallet(opts.agent);
+  let chainGas: Partial<Record<ChainKey, number>> | undefined;
+  if (opts.fundsFrom) {
+    const { holdings } = await scanWallet(opts.fundsFrom);
     chainFunds = {};
-    for (const h of holdings) if (h.stable) chainFunds[h.chain] = (chainFunds[h.chain] ?? 0) + h.amount;
+    chainGas = {};
+    for (const h of holdings) {
+      if (h.stable) chainFunds[h.chain] = (chainFunds[h.chain] ?? 0) + h.amount;
+      else if (h.symbol === GAS_SYMBOL[h.chain] && h.symbol !== "WETH") chainGas[h.chain] = (chainGas[h.chain] ?? 0) + h.amount;
+    }
   }
   const elig = eligibility(profile, {
     ixs: { paused: signals.ixs.paused, whitelistEnabled: signals.ixs.whitelistEnabled, agentWhitelisted: signals.ixs.agentWhitelisted },
     usMarketOpen: signals.market.usMarketOpen,
     chainFunds,
+    chainGas,
   });
   emit({ type: "eligibility", eligibility: elig });
 
@@ -75,5 +87,7 @@ export async function runPipeline(profile: Profile, emit: (e: PipelineEvent) => 
     return;
   }
   const { split, adjustments } = enforce(source, profile, elig);
-  emit({ type: "plan", split, legs: toLegs(split, profile.amountUsd), adjustments, verified: !!vSplit });
+  const legs = toLegs(split, profile.amountUsd);
+  const blocked = opts.fundsFrom && opts.limits ? checkExecutable(legs, profile, elig, opts.limits) : [];
+  emit({ type: "plan", split, legs, adjustments, verified: !!vSplit, blocked });
 }

@@ -219,31 +219,46 @@ async function findBalanceSlot(chain: ChainKey, token: Address, owner: Address):
 }
 
 /** Simulates every step. Nothing is sent. Also checks the agent holds each leg's balance and gas. */
-export async function simulate(steps: Step[], agent: Address, onStep?: (r: StepResult) => void): Promise<StepResult[]> {
+/**
+ * eth_call-simulates every step from `agent` (the operator's agent wallet, or a user's own wallet) against live
+ * mainnet state. injectBalances (demo simulations only): when the wallet holds less than a step spends, the
+ * balance is topped up in the simulation's state override and the step says so. Real runs never inject.
+ */
+export async function simulate(steps: Step[], agent: Address, onStep?: (r: StepResult) => void, opts: { injectBalances?: boolean } = {}): Promise<StepResult[]> {
   const out: StepResult[] = [];
   const push = (r: StepResult) => { out.push(r); onStep?.(r); };
   for (const s of steps) {
     const c = publicClient(s.chain);
     try {
-      // Spending a token the step also "holds" is covered by injection below; otherwise the agent must hold it.
+      let stateOverride: { address: Address; stateDiff: { slot: Hex; value: Hex }[] }[] | undefined;
+      let injected = false;
+      let balanceInjected = false;
+      // Spending a token the step also "holds" is covered by injection below; otherwise the wallet must hold it.
       if (s.spends && s.spends.token.toLowerCase() !== s.holds?.token.toLowerCase()) {
         const bal = await c.readContract({ address: s.spends.token, abi: erc20Abi, functionName: "balanceOf", args: [agent] });
         if (bal < s.spends.amount) {
-          push({ venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: `Agent holds ${bal} base units, needs ${s.spends.amount}.` });
-          continue;
+          const slot = opts.injectBalances ? await findBalanceSlot(s.chain, s.spends.token, agent) : null;
+          if (slot == null) {
+            push({ venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: `Wallet holds ${bal} base units, needs ${s.spends.amount}.` });
+            continue;
+          }
+          stateOverride = [{ address: s.spends.token, stateDiff: [{ slot: balanceKey(agent, slot), value: pad(numberToHex(s.spends.amount), { size: 32 }) }] }];
+          balanceInjected = true;
         }
       }
-      let stateOverride: { address: Address; stateDiff: { slot: Hex; value: Hex }[] }[] | undefined;
-      let injected = false;
       if (s.holds) {
         const bal = await c.readContract({ address: s.holds.token, abi: erc20Abi, functionName: "balanceOf", args: [agent] });
         if (bal < s.holds.amount) {
+          if (!opts.injectBalances) {
+            push({ venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: "The wallet does not hold enough of this position." });
+            continue;
+          }
           const slot = await findBalanceSlot(s.chain, s.holds.token, agent);
           if (slot == null) {
             push({ venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: "Agent holds no position here and it could not be injected for simulation." });
             continue;
           }
-          stateOverride = [{ address: s.holds.token, stateDiff: [{ slot: balanceKey(agent, slot), value: pad(numberToHex(s.holds.amount), { size: 32 }) }] }];
+          stateOverride = [...(stateOverride ?? []), { address: s.holds.token, stateDiff: [{ slot: balanceKey(agent, slot), value: pad(numberToHex(s.holds.amount), { size: 32 }) }] }];
           injected = true;
         }
       }
@@ -261,7 +276,7 @@ export async function simulate(steps: Step[], agent: Address, onStep?: (r: StepR
       const data = encodeFunctionData({ abi: s.abi, functionName: s.functionName, args: s.args } as never);
       await c.call({ account: agent, to: s.to, data, stateOverride });
       const gas = await c.estimateGas({ account: agent, to: s.to, data, stateOverride }).catch(() => null);
-      const note = injected ? " (position injected for simulation)" : "";
+      const note = injected ? " (position injected for simulation)" : balanceInjected ? " (balance injected for simulation)" : "";
       push({ venue: s.venue, chain: s.chain, label: s.label, ok: true, detail: (gas ? `Simulated OK, ~${gas} gas` : "Simulated OK") + note });
     } catch (e) {
       const msg = e instanceof Error ? (e as { shortMessage?: string }).shortMessage ?? e.message : String(e);

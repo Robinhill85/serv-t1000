@@ -29,6 +29,16 @@ export function enforce(input: Split, profile: Profile, elig: Elig): { split: Sp
     }
   }
 
+  // Each venue's ceiling (rules, and in wallet mode what the wallet holds on that chain) is enforced here, not trusted
+  // to the model. The excess goes to Base; if Base itself can't hold it, checkExecutable refuses the plan.
+  for (const id of VENUE_IDS) {
+    if (id === "base" || split[id] <= elig[id].maxPct) continue;
+    const cut = split[id] - elig[id].maxPct;
+    split[id] -= cut;
+    split.base += cut;
+    adjustments.push(`${VENUES[id].hud}: cut ${cut}% to its ${elig[id].maxPct}% ceiling`);
+  }
+
   const cap = volatileCap(profile);
   let vol = volatileIds.reduce((a, id) => a + split[id], 0);
   for (const id of volatileIds) {
@@ -54,7 +64,8 @@ export function enforce(input: Split, profile: Profile, elig: Elig): { split: Sp
 
   // Liquidity buffer: top Base up to 20%, taking from volatile legs first, then from others only while they
   // stay at or above their minimum; a leg that can't give without breaching its minimum is moved whole.
-  if (elig.base.allowed && split.base < LIQUIDITY_BUFFER_PCT) {
+  // (Only when Base can hold the buffer: a wallet with little USDC on Base can't be topped up there.)
+  if (elig.base.allowed && elig.base.maxPct >= LIQUIDITY_BUFFER_PCT && split.base < LIQUIDITY_BUFFER_PCT) {
     const before = split.base;
     let need = LIQUIDITY_BUFFER_PCT - split.base;
     const donors = [...volatileIds, ...VENUE_IDS.filter((id) => id !== "base" && !volatileIds.includes(id))];
@@ -140,10 +151,11 @@ export function checkExecutable(legs: Leg[], profile: Profile, elig: Elig, limit
   const vol = legs.filter((l) => VENUES[l.venue].kind === "volatile").reduce((a, l) => a + l.pct, 0);
   if (vol > cap) errors.push(`Volatile legs ${vol}% exceed the ${cap}% cap.`);
   const basePct = legs.find((l) => l.venue === "base")?.pct ?? 0;
-  if (elig.base.allowed && basePct < LIQUIDITY_BUFFER_PCT) errors.push(`Base buffer ${basePct}% is under ${LIQUIDITY_BUFFER_PCT}%.`);
+  if (elig.base.allowed && elig.base.maxPct >= LIQUIDITY_BUFFER_PCT && basePct < LIQUIDITY_BUFFER_PCT) errors.push(`Base buffer ${basePct}% is under ${LIQUIDITY_BUFFER_PCT}%.`);
   for (const l of legs) {
     const v = VENUES[l.venue];
     if (!elig[l.venue].allowed) errors.push(`${v.hud} is blocked (${elig[l.venue].reasons.join(", ")}).`);
+    else if (l.pct > elig[l.venue].maxPct) errors.push(`${v.hud} needs ${l.pct}% but can take at most ${elig[l.venue].maxPct}% (${elig[l.venue].reasons.includes("NO_FUNDS_ON_CHAIN") ? "the wallet's funds on that chain" : "rulebook ceiling"}).`);
     if (!v.executable) errors.push(`${v.hud} is not executable in this version.`);
     if (l.usd < v.minUsd) errors.push(`${v.hud} leg $${l.usd} is below the $${v.minUsd} minimum.`);
     if (l.usd <= 0) errors.push(`${v.hud} leg is not positive.`);

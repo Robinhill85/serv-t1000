@@ -353,3 +353,25 @@ html, body { height: 100%; background: #000; color: var(--chat-text); font-famil
 .guard-tools button:hover:not(:disabled) { border-color: var(--chat-accent); }
 .guard-tools button:disabled { opacity: 0.5; cursor: not-allowed; }
 .hud-option.is-picked, .hud-stamp.is-verified, .hud-stamp.is-corrected, .guard-row.is-alert, .hud-leg { text-shadow: none; }
+
+/* ---------- "My wallet" mode ---------- */
+.chat-guide { margin-left: auto; font-weight: 500; font-size: 13px; color: var(--chat-accent); }
+.chat-guide + .chat-reset { margin-left: 12px; }
+.wallet-box { border: 1px solid var(--chat-line); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 8px; background: var(--chat-panel); }
+.wallet-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--chat-muted); }
+.wallet-row { display: flex; align-items: center; gap: 8px; }
+.wallet-addr { font-family: var(--font-hud), ui-monospace, monospace; font-size: 16px; }
+.wallet-scan { margin-top: 0; width: auto; flex: 1; padding: 8px 10px; }
+.wallet-block { color: #ffb4a6; }
+.risk { display: grid; grid-template-columns: 18px 1fr; gap: 8px; align-items: start; font-size: 12px; color: var(--chat-muted); line-height: 1.4; }
+.risk input { margin-top: 2px; accent-color: var(--chat-accent); }
+.btn-live-link:disabled { opacity: 0.5; cursor: not-allowed; }
+.guide { position: absolute; inset: 49px 0 0 0; z-index: 30; background: var(--chat-bg); overflow-y: auto; border-top: 1px solid var(--chat-line); }
+.guide-head { display: flex; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--chat-line); position: sticky; top: 0; background: var(--chat-bg); }
+.guide-body { padding: 12px 16px 24px; font-size: 14px; line-height: 1.5; }
+.guide-body h4 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--chat-muted); }
+.guide-body ul, .guide-body ol { padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.guide-body ul { list-style: disc; }
+.guide-body ol { list-style: decimal; }
+.guide-body p { margin: 6px 0; }
+.split-chat { position: relative; }

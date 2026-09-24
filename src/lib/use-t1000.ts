@@ -13,9 +13,16 @@ import type { Holding } from "./scan";
 import type { Signals } from "./signals";
 import { blendTargets, rebase } from "./guard-math";
 import type { Eligibility, Leg, Position, Profile, Split } from "./types";
+import type { Address } from "viem";
+import type { WalletStepsResponse } from "@/app/api/wallet-steps/route";
+import { wagmiConfig } from "@/components/WalletProvider";
+import { runWalletSteps } from "./wallet-exec";
 
 export type StepView = { venue: string; chain: string; label: string; ok?: boolean; detail?: string; hash?: string; explorer?: string };
-export type Execution = { mode: "simulate" | "live"; status: "running" | "done" | "failed"; checks: string[]; steps: StepView[]; error?: string };
+/** by: "wallet" = signed in the user's own wallet ("My wallet" mode); otherwise the server/agent path. */
+export type Execution = { mode: "simulate" | "live"; status: "running" | "done" | "failed"; checks: string[]; steps: StepView[]; error?: string; by?: "agent" | "wallet" };
+
+export type ScanResult = { holdings: Holding[]; idleStablesUsd: number; maxRunUsd: number; walletMaxRunUsd: number; walletEnabled: boolean };
 
 export type Phase = "idle" | "scanning_wallet" | "profile" | "targeting" | "deciding" | "verifying" | "done" | "guard" | "error";
 
@@ -27,8 +34,10 @@ export type GuardSession = {
   legs: Leg[];
   entry: { at: number; ethPriceUsd: number | null; idleUsd: number | null };
   scenario: { ethMult: number } | null;
-  /** True once real funds were deployed: the session is kept in this browser (the operator's) to resume later. */
+  /** True once real funds were deployed: the session is kept in this browser to resume later. */
   deployedLive: boolean;
+  /** "My wallet" sessions: the user's wallet, read onchain when the source is "live" (else the operator's agent). */
+  address?: string;
 };
 export type MovePlan = { summary: string; moves: Move[]; check: MoveCheck; verified: boolean; iat?: number; planToken?: string };
 export type RebalanceView = {
@@ -62,7 +71,7 @@ export type RunState = {
   jev: JevResult | null;
   fast: { result: DecideResult; split: Split | null; legs: Leg[] } | null;
   verified: { result: DecideResult; revised: boolean } | null;
-  plan: { split: Split; legs: Leg[]; adjustments: string[]; verified: boolean; iat?: number; planToken?: string } | null;
+  plan: { split: Split; legs: Leg[]; adjustments: string[]; verified: boolean; blocked: string[]; iat?: number; planToken?: string } | null;
   profile: Profile | null;
   execution: Execution | null;
   error: string | null;
@@ -70,11 +79,15 @@ export type RunState = {
   /** Client arrival times, used to pace the HUD animation. */
   arrived: { signals?: number; fast?: number };
   guard: GuardView | null;
+  /** "My wallet" mode: the connected wallet this run plans for and signs with; null = demo. */
+  wallet: string | null;
+  walletMaxRunUsd: number | null;
 };
 
 const initial: RunState = {
   phase: "idle", holdings: null, idleStablesUsd: null, maxRunUsd: null, signals: null, eligibility: null, jev: null,
   fast: null, verified: null, plan: null, error: null, startedAt: null, arrived: {}, profile: null, execution: null, guard: null,
+  wallet: null, walletMaxRunUsd: null,
 };
 const clearedRun = { signals: null, eligibility: null, jev: null, fast: null, verified: null, plan: null, execution: null, error: null, arrived: {} };
 
@@ -83,8 +96,11 @@ export const GUARD_STORE_KEY = "t1000.guard.v1";
 
 function guardRequest(s: GuardSession) {
   const { preference, risk, horizon, instantAccess } = s.profile;
-  return { source: s.source, profile: { preference, risk, horizon, instantAccess }, legs: s.legs, entry: s.entry, scenario: s.scenario };
+  // The user's wallet is only read for its real positions; projections stay on the demo path.
+  const address = s.address && s.source === "live" ? { address: s.address } : {};
+  return { source: s.source, profile: { preference, risk, horizon, instantAccess }, legs: s.legs, entry: s.entry, scenario: s.scenario, ...address };
 }
+const storeKey = (address?: string) => (address ? `${GUARD_STORE_KEY}.${address.toLowerCase()}` : GUARD_STORE_KEY);
 
 /** Reads a `data: {...}\n\n` event stream to the end. */
 async function readSse(res: Response, on: (e: { type: string; [k: string]: unknown }) => void) {
@@ -135,14 +151,15 @@ export function useT1000() {
     return (f: (g: GuardView) => GuardView) => { if (epoch.current === ep) setGuard(f); };
   }, [setGuard]);
 
-  const scanWallet = useCallback(async (address: string) => {
-    setState({ ...initial, phase: "scanning_wallet" });
+  /** walletMode: the address is the user's connected wallet ("My wallet" mode); otherwise a demo scan. */
+  const scanWallet = useCallback(async (address: string, walletMode = false) => {
+    setState({ ...initial, phase: "scanning_wallet", wallet: walletMode ? address : null });
     try {
       const res = await fetch(`/api/scan?address=${address}`);
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Scan failed.");
-      setState((s) => ({ ...s, phase: "profile", holdings: json.holdings, idleStablesUsd: json.idleStablesUsd, maxRunUsd: json.maxRunUsd ?? null }));
-      return json.idleStablesUsd as number;
+      setState((s) => ({ ...s, phase: "profile", holdings: json.holdings, idleStablesUsd: json.idleStablesUsd, maxRunUsd: json.maxRunUsd ?? null, walletMaxRunUsd: json.walletMaxRunUsd ?? null }));
+      return json as ScanResult;
     } catch (e) {
       setState((s) => ({ ...s, phase: "error", error: e instanceof Error ? e.message : "Scan failed." }));
       return null;
@@ -158,7 +175,7 @@ export function useT1000() {
       const res = await fetch("/api/decide", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(profile),
+        body: JSON.stringify(stateRef.current.wallet ? { ...profile, wallet: stateRef.current.wallet } : profile),
         signal: ctrl.signal,
       });
       if (!res.ok || !res.body) throw new Error((await res.json().catch(() => ({}))).error ?? "Decision failed.");
@@ -173,7 +190,7 @@ export function useT1000() {
             case "decision_verified": return { ...s, verified: { result: e.result, revised: e.revised } };
             case "plan": {
               const signed = e as typeof e & { iat?: number; planToken?: string };
-              return { ...s, plan: { split: e.split, legs: e.legs, adjustments: e.adjustments, verified: e.verified, iat: signed.iat, planToken: signed.planToken }, phase: "done" };
+              return { ...s, plan: { split: e.split, legs: e.legs, adjustments: e.adjustments, verified: e.verified, blocked: e.blocked ?? [], iat: signed.iat, planToken: signed.planToken }, phase: "done" };
             }
             case "error": return { ...s, phase: "error", error: e.message };
             default: return s;
@@ -202,6 +219,40 @@ export function useT1000() {
       await readSse(res, (e) => { if (epoch.current === ep) setState((s) => ({ ...s, execution: applyExec(s.execution ?? blank, e) })); });
     } catch (e) {
       fail(e instanceof Error ? e.message : "Execution failed.");
+    }
+  }, []);
+
+  /**
+   * "My wallet" mode. The server re-checks the signed plan against the wallet's live funds, builds its transactions and
+   * pre-flight-simulates them from the wallet. "simulate" stops there; "live" then asks the wallet to confirm each one.
+   */
+  const executeWithWallet = useCallback(async (mode: "simulate" | "live", plan: RunState["plan"], profile: Profile | null) => {
+    const address = stateRef.current.wallet;
+    if (!plan?.planToken || !profile || !address) return;
+    const ep = epoch.current;
+    const live = () => epoch.current === ep;
+    const blank: Execution = { mode, by: "wallet", status: "running", checks: [], steps: [] };
+    const patch = (f: (ex: Execution) => Execution) => { if (live()) setState((s) => ({ ...s, execution: f(s.execution ?? blank) })); };
+    setState((s) => ({ ...s, execution: blank }));
+    try {
+      const res = await fetch("/api/wallet-steps", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kind: "plan", address, profile, legs: plan.legs, iat: plan.iat, planToken: plan.planToken }),
+      });
+      const json = (await res.json()) as WalletStepsResponse;
+      const preflight: StepView[] = json.simulation.map((r) => ({ venue: r.venue, chain: r.chain, label: r.label, ok: r.ok, detail: r.detail }));
+      if (!json.ok) {
+        patch((ex) => ({ ...ex, status: "failed", checks: json.errors, steps: preflight, error: "Nothing was sent: the pre-flight check from your wallet did not pass." }));
+        return;
+      }
+      if (mode === "simulate") { patch((ex) => ({ ...ex, status: "done", steps: preflight })); return; }
+      patch((ex) => ({ ...ex, steps: json.steps.map((st) => ({ venue: st.venue, chain: st.chain, label: st.label, detail: "Waiting" })) }));
+      const ok = await runWalletSteps(wagmiConfig, json.steps, address as Address, (i, v) =>
+        patch((ex) => ({ ...ex, steps: ex.steps.map((st, k) => (k === i ? v : st)) })));
+      patch((ex) => ({ ...ex, status: ok ? "done" : "failed" }));
+    } catch (e) {
+      patch((ex) => ({ ...ex, status: "failed", error: e instanceof Error ? e.message : "The wallet run stopped." }));
     }
   }, []);
 
@@ -235,6 +286,7 @@ export function useT1000() {
     const s = stateRef.current;
     if (!s.plan || !s.profile || !s.execution) return;
     const mode = s.execution.mode;
+    const byWallet = s.execution.by === "wallet" && !!s.wallet;
     const prev = s.guard;
     let session: GuardSession;
     if (prev && prev.feeding != null) {
@@ -252,6 +304,7 @@ export function useT1000() {
         legs: legs.map((l) => ({ ...l, pct: targets[l.venue] ?? 0 })),
         entry: { ...base.entry, idleUsd: null },
         deployedLive: base.deployedLive || mode === "live",
+        address: base.address ?? (byWallet ? s.wallet! : undefined),
       };
     } else {
       session = {
@@ -261,6 +314,7 @@ export function useT1000() {
         entry: { at: Date.now(), ethPriceUsd: s.signals?.rhEth.priceUsd ?? null, idleUsd: null },
         scenario: null,
         deployedLive: mode === "live",
+        address: byWallet ? s.wallet! : undefined,
       };
     }
     setState((x) => ({
@@ -333,6 +387,29 @@ export function useT1000() {
     const blank: Execution = { mode, status: "running", checks: [], steps: [] };
     write((x) => ({ ...x, moves: blank, movesFrom: x.data?.positions ?? null }));
     const fail = (error: string) => write((x) => ({ ...x, moves: { ...(x.moves ?? blank), status: "failed", error } }));
+    if (g.session.address && g.session.source === "live") {
+      // Moves on the user's own wallet: same server checks, signed in their wallet.
+      const address = g.session.address as Address;
+      const patch = (f: (ex: Execution) => Execution) => write((x) => ({ ...x, moves: f(x.moves ?? { ...blank, by: "wallet" }) }));
+      patch(() => ({ ...blank, by: "wallet" }));
+      try {
+        const res = await fetch("/api/wallet-steps", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ kind: "moves", address, moves: plan.check.executable, guard: guardRequest(g.session), iat: plan.iat, planToken: plan.planToken }),
+        });
+        const json = (await res.json()) as WalletStepsResponse;
+        const preflight: StepView[] = json.simulation.map((r) => ({ venue: r.venue, chain: r.chain, label: r.label, ok: r.ok, detail: r.detail }));
+        if (!json.ok) { patch((ex) => ({ ...ex, status: "failed", checks: json.errors, steps: preflight, error: "Nothing was sent: the pre-flight check from your wallet did not pass." })); return; }
+        if (mode === "simulate") { patch((ex) => ({ ...ex, status: "done", steps: preflight })); return; }
+        patch((ex) => ({ ...ex, steps: json.steps.map((st) => ({ venue: st.venue, chain: st.chain, label: st.label, detail: "Waiting" })) }));
+        const ok = await runWalletSteps(wagmiConfig, json.steps, address, (i, v) => patch((ex) => ({ ...ex, steps: ex.steps.map((st, k) => (k === i ? v : st)) })));
+        patch((ex) => ({ ...ex, status: ok ? "done" : "failed" }));
+      } catch (e) {
+        fail(e instanceof Error ? e.message : "The wallet run stopped.");
+      }
+      return;
+    }
     try {
       const res = await fetch("/api/execute", {
         method: "POST",
@@ -366,20 +443,23 @@ export function useT1000() {
 
   const dismissRebalance = useCallback(() => setGuard((x) => ({ ...x, rebalance: null, moves: null, movesFrom: null })), [setGuard]);
 
-  /** The operator's browser keeps a live deployment's Guard session, so it can be resumed on a later visit. */
-  const resumeGuard = useCallback(() => {
+  /** A live deployment's Guard session is kept in this browser (the operator's, or per connected wallet) to resume. */
+  const resumeGuard = useCallback((address?: string) => {
     let session: GuardSession | null = null;
-    try { session = JSON.parse(localStorage.getItem(GUARD_STORE_KEY) ?? "null"); } catch { session = null; }
+    try { session = JSON.parse(localStorage.getItem(storeKey(address)) ?? "null"); } catch { session = null; }
     if (!session?.legs?.length || !session.profile) return;
-    session = { ...session, source: "live", scenario: null };
-    setState({ ...initial, phase: "guard", profile: session.profile, guard: { session, data: null, scanning: false, error: null, lastScanAt: null, feeding: null, rebalance: null, moves: null, movesFrom: null } });
+    session = { ...session, source: "live", scenario: null, address: address ?? session.address };
+    setState({
+      ...initial, phase: "guard", profile: session.profile, wallet: address ?? null,
+      guard: { session, data: null, scanning: false, error: null, lastScanAt: null, feeding: null, rebalance: null, moves: null, movesFrom: null },
+    });
     void scanGuard(session);
   }, [scanGuard]);
 
   const session = state.guard?.session;
   useEffect(() => {
     if (!session?.deployedLive) return;
-    try { localStorage.setItem(GUARD_STORE_KEY, JSON.stringify(session)); } catch { /* storage unavailable */ }
+    try { localStorage.setItem(storeKey(session.address), JSON.stringify(session)); } catch { /* storage unavailable */ }
   }, [session]);
 
   // Auto re-scan every minute while Guard is simply watching (paused during a feed, a proposal or moves).
@@ -394,7 +474,7 @@ export function useT1000() {
 
   const reset = useCallback(() => { abortRef.current?.abort(); scanSeq.current++; epoch.current++; setState(initial); }, []);
   return {
-    state, scanWallet, run, reset, executePlan,
+    state, scanWallet, run, reset, executePlan, executeWithWallet,
     enterGuard, scanGuard, setGuardSource, setScenario, feed, cancelFeed, proposeRebalance, executeMoves, applyMoves, dismissRebalance, resumeGuard,
   };
 }

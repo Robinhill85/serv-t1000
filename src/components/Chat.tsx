@@ -4,7 +4,9 @@ import { VENUES, type VenueId } from "@/lib/config";
 import { whenIntroDone } from "@/components/Intro";
 import type { Position, Profile } from "@/lib/types";
 import { DRIFT_PP } from "@/lib/rulebook";
-import { GUARD_STORE_KEY, type Execution, type GuardSource, type GuardSession, type RunState } from "@/lib/use-t1000";
+import { GUARD_STORE_KEY, type Execution, type GuardSource, type GuardSession, type RunState, type ScanResult } from "@/lib/use-t1000";
+import { useAccount, useConnect, useDisconnect } from "wagmi";
+import { WalletGuide } from "@/components/WalletGuide";
 
 type Step = {
   key: keyof Profile;
@@ -42,7 +44,7 @@ export type GuardActions = {
   executeMoves: (mode: "simulate" | "live", passcode?: string) => void;
   applyMoves: () => void;
   dismiss: () => void;
-  resume: () => void;
+  resume: (address?: string) => void;
 };
 
 /**
@@ -84,12 +86,27 @@ function positionNote(p: Position, apy: number | null | undefined) {
 
 const noopSubscribe = () => () => {};
 const readStoredGuard = () => { try { return localStorage.getItem(GUARD_STORE_KEY); } catch { return null; } };
+const readStoredWalletGuard = (address?: string) => { if (!address) return null; try { return localStorage.getItem(`${GUARD_STORE_KEY}.${address.toLowerCase()}`); } catch { return null; } };
+const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+const CHAIN_LABEL = { base: "Base", avalanche: "Avalanche", robinhood: "Robinhood Chain" } as const;
+
+/** What a scanned wallet holds per chain, in one sentence (stables and gas), for "My wallet" mode. */
+function describeWallet(r: ScanResult): string {
+  const parts = (["base", "avalanche", "robinhood"] as const).map((c) => {
+    const stable = r.holdings.filter((h) => h.chain === c && h.stable).reduce((a, h) => a + h.amount, 0);
+    const gas = r.holdings.find((h) => h.chain === c && !h.stable && h.symbol !== "WETH");
+    return `${CHAIN_LABEL[c]}: ${usd(stable)}${stable > 0 && (!gas || gas.amount === 0) ? " (no gas)" : ""}`;
+  });
+  return `Your wallet holds ${usd(r.idleStablesUsd)} in idle stablecoins. ${parts.join(" · ")}. I only plan with what each chain already holds (no bridging), and the IXS vault needs $100+ USDC on Avalanche.`;
+}
+
+const RISK_TEXT = "Real funds from my wallet. This is a hackathon beta and not financial advice. IXS is a regulated RWA vault: deposits settle T+1, exits cost 0.5%, and IXS can reject a request (the USDC comes back). ETH is volatile. I confirm every transaction in my wallet.";
 
 function ExecutionView({ ex, title }: { ex: Execution; title: string }) {
   return (
     <div className="msg msg-agent msg-plan">
       <div className="msg-kicker">
-        {title} · {ex.mode === "live" ? "live" : "simulation"} · {ex.status === "running" ? "in progress" : ex.status === "done" ? (ex.mode === "live" ? "all confirmed" : "every step passes, nothing was sent") : "stopped"}
+        {title} · {ex.by === "wallet" ? "your wallet · " : ""}{ex.mode === "live" ? "live" : "simulation"} · {ex.status === "running" ? "in progress" : ex.status === "done" ? (ex.mode === "live" ? "all confirmed" : "every step passes, nothing was sent") : "stopped"}
       </div>
       {ex.checks.map((c) => <div key={c} className="plan-adjust">Blocked: {c}</div>)}
       {ex.steps.map((st, i) => (
@@ -117,20 +134,31 @@ const DEMOS: Record<string, Profile> = {
 };
 const usd = (n: number) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-export function Chat({ state, onScan, onRun, onReset, onExecute, guard: G }: {
+export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet, guard: G }: {
   state: RunState;
-  onScan: (address: string) => Promise<number | null>;
+  onScan: (address: string, walletMode?: boolean) => Promise<ScanResult | null>;
   onRun: (p: Profile) => void;
   onReset: () => void;
   onExecute: (mode: "simulate" | "live", plan: RunState["plan"], profile: Profile | null, passcode?: string) => void;
+  onExecuteWallet: (mode: "simulate" | "live", plan: RunState["plan"], profile: Profile | null) => void;
   guard: GuardActions;
 }) {
+  const { address: connected, isConnected } = useAccount();
+  const { connectors, connect, isPending: connecting, error: connectError } = useConnect();
+  const { disconnect } = useDisconnect();
+  // Discovered wallets (EIP-6963) replace the generic "Injected" entry when there are any.
+  const walletOptions = connectors.filter((c) => !(c.id === "injected" && connectors.some((o) => o.type === "injected" && o.id !== "injected")));
+  const [guideOpen, setGuideOpen] = useState(false);
+  const [riskOk, setRiskOk] = useState(false);
+  const storedMine = useSyncExternalStore(noopSubscribe, () => readStoredWalletGuard(connected), () => null);
+  const walletMode = !!state.wallet;
+  const walletMismatch = walletMode && !!connected && connected.toLowerCase() !== state.wallet!.toLowerCase();
   const [liveOpen, setLiveOpen] = useState(false);
   const [passcode, setPasscode] = useState("");
   const [movesLiveOpen, setMovesLiveOpen] = useState(false);
   const [movesPasscode, setMovesPasscode] = useState("");
   const storedGuard = useSyncExternalStore(noopSubscribe, readStoredGuard, () => null);
-  const [msgs, setMsgs] = useState<Msg[]>([{ from: "agent", text: "I'm T1000. I find idle stablecoins and decide where they should live. Connect a wallet so I can see what you hold." }]);
+  const [msgs, setMsgs] = useState<Msg[]>([{ from: "agent", text: "I'm T1000. I find idle stablecoins and decide where they should live. Connect your wallet to deploy your own (you confirm every step), or try the demo: the same flow as a full simulation against live mainnet, nothing is sent." }]);
   const [address, setAddress] = useState(DEMO_WALLET);
   const [step, setStep] = useState(-1);
   const [profile, setProfile] = useState<Partial<Profile>>({});
@@ -157,7 +185,7 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, guard: G }: {
       const total = plan.legs.reduce((a, l) => a + l.usd, 0);
       say({
         from: "agent",
-        kicker: `${feeding != null ? "Fed" : "Deployed"} · ${ex.mode === "live" ? "live" : "simulated"} · ${usd(total)}`,
+        kicker: `${feeding != null ? "Fed" : "Deployed"} · ${ex.by === "wallet" ? "from your wallet · " : ""}${ex.mode === "live" ? "live" : "simulated"} · ${usd(total)}`,
         text: `${summary ? summary + " " : ""}${plan.legs.map((l) => `${VENUES[l.venue].name} ${l.pct}% (${usd(l.usd)})`).join(" · ")}. ${ex.steps.length} transactions ${ex.mode === "live" ? "confirmed" : "passed simulation; nothing was sent"}.`,
       });
       say({
@@ -200,8 +228,8 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, guard: G }: {
     autoRan.current = true;
     whenIntroDone(async () => {
       say({ from: "user", text: `Scan ${DEMO_WALLET.slice(0, 6)}…${DEMO_WALLET.slice(-4)}` });
-      const idle = await onScan(DEMO_WALLET);
-      if (idle != null) say({ from: "agent", text: `I see ${usd(idle)} in idle stablecoins across Base, Avalanche and Robinhood Chain.` });
+      const r = await onScan(DEMO_WALLET);
+      if (r) say({ from: "agent", text: `I see ${usd(r.idleStablesUsd)} in idle stablecoins across Base, Avalanche and Robinhood Chain.` });
       for (const s of STEPS) {
         say({ from: "agent", text: s.ask });
         const v = demo[s.key];
@@ -217,10 +245,29 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, guard: G }: {
 
   async function scan() {
     if (!/^0x[0-9a-fA-F]{40}$/.test(address)) { say({ from: "agent", text: "That doesn't look like a wallet address." }); return; }
-    say({ from: "user", text: `Scan ${address.slice(0, 6)}…${address.slice(-4)}` });
-    const idle = await onScan(address);
-    if (idle == null) { say({ from: "agent", text: "I couldn't read that wallet. Try again in a moment." }); return; }
-    say({ from: "agent", text: `I see ${usd(idle)} in idle stablecoins across Base, Avalanche and Robinhood Chain.` });
+    say({ from: "user", text: `Scan ${short(address)} (demo)` });
+    const r = await onScan(address);
+    if (!r) { say({ from: "agent", text: "I couldn't read that wallet. Try again in a moment." }); return; }
+    say({
+      from: "agent",
+      text: `I see ${usd(r.idleStablesUsd)} in idle stablecoins across Base, Avalanche and Robinhood Chain. This is the demo: every run is simulated against live mainnet and nothing is sent.`,
+    });
+    setStep(0);
+    say({ from: "agent", text: STEPS[0].ask });
+  }
+
+  /** "My wallet" mode: scan the connected wallet; plans and transactions are for this address. */
+  async function scanMine() {
+    if (!connected) return;
+    say({ from: "user", text: `Scan my wallet ${short(connected)}` });
+    const r = await onScan(connected, true);
+    if (!r) { say({ from: "agent", text: "I couldn't read your wallet. Try again in a moment." }); return; }
+    if (!r.walletEnabled) { say({ from: "agent", text: "Wallet mode is switched off right now. The demo still works." }); return; }
+    say({ from: "agent", text: describeWallet(r) });
+    if (r.idleStablesUsd < 5) {
+      say({ from: "agent", text: "There's not enough here to deploy yet. Add USDC on Base or Avalanche (or USDG on Robinhood Chain) plus a little gas, or try the demo." });
+      return;
+    }
     setStep(0);
     say({ from: "agent", text: STEPS[0].ask });
   }
@@ -237,8 +284,8 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, guard: G }: {
       let n = Number(v);
       const idle = state.idleStablesUsd ?? 0;
       if (idle > 0 && n > idle) { n = idle; notes.push(`You hold ${usd(idle)} in idle stables, so I'll work with that.`); }
-      const cap = state.maxRunUsd;
-      if (cap && n > cap) { n = cap; notes.push(`This demo caps each run at ${usd(cap)}, so I'll plan ${usd(cap)}.`); }
+      const cap = walletMode ? state.walletMaxRunUsd : state.maxRunUsd;
+      if (cap && n > cap) { n = cap; notes.push(walletMode ? `Wallet runs are capped at ${usd(cap)} during the beta, so I'll plan ${usd(cap)}.` : `This demo caps each run at ${usd(cap)}, so I'll plan ${usd(cap)}.`); }
       v = n;
     }
     const next = { ...profile, [s.key]: v } as Partial<Profile>;
@@ -288,9 +335,11 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, guard: G }: {
     <div className="chat">
       <div className="chat-head">
         <span className="chat-dot" /> T1000 agent
+        <button className="chat-guide" onClick={() => setGuideOpen(true)}>Use your own wallet</button>
         <button className="chat-reset" onClick={onReset} title="Start again from the intro">Restart</button>
       </div>
 
+      {guideOpen && <WalletGuide onClose={() => setGuideOpen(false)} walletMaxRunUsd={state.walletMaxRunUsd} />}
       <div className="chat-log" ref={logRef}>
         {msgs.map((m, i) => (
           <div key={i} className={`msg msg-${m.from}`}>
@@ -328,7 +377,31 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, guard: G }: {
               <div className="plan-blocked">Excluded: {verifiedDecision.blocked.map((b) => `${VENUES[b.venue].name} (${b.reason.replace(/_/g, " ").toLowerCase()})`).join(", ")}</div>
             ) : null}
             {state.plan.adjustments.map((a) => <div key={a} className="plan-adjust">Guard: {a}</div>)}
-            {state.plan.verified && state.plan.planToken ? (
+            {state.plan.blocked.length > 0 && (
+              <div className="plan-adjust wallet-block">
+                Your wallet can&apos;t fund this split: {state.plan.blocked.join(" ")} Restart with a smaller amount, or add funds on that chain.
+              </div>
+            )}
+            {state.plan.verified && state.plan.planToken && walletMode ? (
+              <div className="exec-actions">
+                {walletMismatch ? (
+                  <div className="plan-adjust wallet-block">Your wallet switched accounts since the scan. Restart to plan for the new one.</div>
+                ) : (
+                  <>
+                    <label className="risk">
+                      <input type="checkbox" checked={riskOk} onChange={(e) => setRiskOk(e.target.checked)} />
+                      <span>{RISK_TEXT}</span>
+                    </label>
+                    <button className="btn-approve" disabled={!riskOk || !isConnected || state.execution?.status === "running"} onClick={() => onExecuteWallet("live", state.plan, state.profile)}>
+                      {state.execution?.status === "running" && state.execution.mode === "live" ? "Confirm each step in your wallet…" : "Deploy from my wallet"}
+                    </button>
+                    <button className="btn-live-link" disabled={state.execution?.status === "running"} onClick={() => onExecuteWallet("simulate", state.plan, state.profile)}>
+                      Check it first: simulate from my wallet (nothing is sent)
+                    </button>
+                  </>
+                )}
+              </div>
+            ) : state.plan.verified && state.plan.planToken ? (
               <div className="exec-actions">
                 <button className="btn-approve" disabled={state.execution?.status === "running"} onClick={() => onExecute("simulate", state.plan, state.profile)}>
                   {state.execution?.status === "running" && state.execution.mode === "simulate" ? "Simulating…" : "Simulate the run (no funds move)"}
@@ -343,7 +416,7 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, guard: G }: {
                 )}
               </div>
             ) : (
-              <button className="btn-approve" disabled>Not verified: cannot execute</button>
+              <button className="btn-approve" disabled>{state.plan.blocked.length ? "This wallet can't fund this split" : "Not verified: cannot execute"}</button>
             )}
           </div>
         )}
@@ -365,9 +438,34 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, guard: G }: {
       <div className="chat-input">
         {step === -1 && !state.guard && (
           <>
+            <div className="wallet-box">
+              <div className="wallet-title">Use your own wallet</div>
+              {isConnected && connected ? (
+                <div className="wallet-row">
+                  <span className="wallet-addr">{short(connected)}</span>
+                  <button className="btn-approve wallet-scan" onClick={scanMine} disabled={state.phase === "scanning_wallet"}>
+                    {state.phase === "scanning_wallet" ? "Scanning…" : "Scan my wallet"}
+                  </button>
+                  <button className="btn-live-link" onClick={() => disconnect()}>Disconnect</button>
+                </div>
+              ) : (
+                <div className="chips">
+                  {walletOptions.map((c) => (
+                    <button key={c.uid} disabled={connecting} onClick={() => connect({ connector: c })}>{c.name === "Injected" ? "Browser wallet" : c.name}</button>
+                  ))}
+                </div>
+              )}
+              {connectError && <div className="plan-cite">{connectError.message.split("\n")[0]}</div>}
+              {storedMine && connected && (
+                <button className="btn-live-link" onClick={() => { say({ from: "agent", text: "Resuming Guard on your wallet's live positions." }); G.resume(connected); }}>
+                  Resume Guard on my wallet
+                </button>
+              )}
+            </div>
+            <div className="wallet-title">Or try the demo (full simulation, nothing is sent)</div>
             <div className="chat-row">
               <input value={address} onChange={(e) => setAddress(e.target.value.trim())} spellCheck={false} aria-label="Wallet address" />
-              <button onClick={scan} disabled={state.phase === "scanning_wallet"}>{state.phase === "scanning_wallet" ? "Scanning…" : "Scan wallet"}</button>
+              <button onClick={scan} disabled={state.phase === "scanning_wallet"}>{state.phase === "scanning_wallet" ? "Scanning…" : "Scan (demo)"}</button>
             </div>
             {storedGuard && (
               <button className="btn-live-link" onClick={() => { say({ from: "agent", text: "Resuming Guard on the agent wallet's live positions." }); G.resume(); }}>
@@ -412,12 +510,12 @@ function GuardCard({ state, G }: { state: RunState; G: GuardActions }) {
   return (
     <div className="msg msg-agent msg-plan">
       <div className="msg-kicker">
-        Guard · {session.source === "live" ? "agent wallet, onchain" : "simulated positions"}
+        Guard · {session.source === "live" ? (session.address ? "your wallet, onchain" : "agent wallet, onchain") : "simulated positions"}
         {session.scenario && " · scenario"} · {g.scanning ? "scanning…" : data ? `checked ${new Date(data.at).toLocaleTimeString()}` : "…"}
       </div>
       <div className="seg" role="group" aria-label="Positions source">
         <button className={session.source === "simulated" ? "is-on" : ""} disabled={busy} onClick={() => G.setSource("simulated")}>Simulated</button>
-        <button className={session.source === "live" ? "is-on" : ""} disabled={busy} onClick={() => G.setSource("live")}>Agent wallet (onchain)</button>
+        <button className={session.source === "live" ? "is-on" : ""} disabled={busy} onClick={() => G.setSource("live")}>{session.address ? "My wallet (onchain)" : "Agent wallet (onchain)"}</button>
       </div>
       {session.scenario && (
         <div className="guard-scenario">SCENARIO: ETH {pctMove(session.scenario.ethMult)} from the live price, the smallest move that breaks your 5pp band. What-if only; it never reaches a live run.</div>
@@ -433,7 +531,9 @@ function GuardCard({ state, G }: { state: RunState; G: GuardActions }) {
       ))}
       {data && total === 0 && (
         <div className="plan-cite guard-clear-note">
-          {session.source === "live" ? "The agent wallet holds no positions yet. Positions appear here after an operator's live run." : "No positions to watch."}
+          {session.source === "live"
+            ? (session.address ? "Your wallet holds no T1000 positions yet. They appear here once your deploy confirms." : "The agent wallet holds no positions yet. Positions appear here after an operator's live run.")
+            : "No positions to watch."}
         </div>
       )}
       {data && total === 0 && triggers.map((t, i) => <div key={i} className="guard-trig"><span className="guard-code">{t.code.replace(/_/g, " ")}</span>{t.detail}</div>)}
@@ -470,6 +570,7 @@ function RebalanceCard({ state, G, liveOpen, setLiveOpen, passcode, setPasscode 
   const plan = rb.plan;
   const running = g.moves?.status === "running";
   const canLive = g.session.source === "live" && !g.session.scenario;
+  const byWallet = canLive && !!g.session.address;
   // A correction means different moves; a reworded summary alone is not one.
   const key = (d?: { moves: { from: string; to: string; usd: number }[] } | null) => JSON.stringify(d?.moves.map((m) => [m.from, m.to, m.usd]) ?? null);
   const corrected = !!rb.verified?.ok && !!rb.verified.value && !!rb.fast?.value && key(rb.verified.value) !== key(rb.fast.value);
@@ -511,7 +612,10 @@ function RebalanceCard({ state, G, liveOpen, setLiveOpen, passcode, setPasscode 
       {plan?.planToken && !g.moves && (
         <div className="exec-actions">
           <button className="btn-approve" disabled={running} onClick={() => G.executeMoves("simulate")}>Simulate the moves (no funds move)</button>
-          {canLive && (!liveOpen ? (
+          {byWallet && (
+            <button className="btn-approve" disabled={running} onClick={() => G.executeMoves("live")}>Sign the moves in my wallet</button>
+          )}
+          {canLive && !byWallet && (!liveOpen ? (
             <button className="btn-live-link" onClick={() => setLiveOpen(true)}>Operator: run live</button>
           ) : (
             <form className="chat-row" onSubmit={(e) => { e.preventDefault(); G.executeMoves("live", passcode); setPasscode(""); }}>

@@ -1,13 +1,15 @@
 // Hard rules live in code (SERV "day one": exact business rules are not the model's job).
 // SERV reasons about weights inside these bounds; plan-guard re-checks them before any money moves.
-import { STOCK_TOKEN_EXCLUDED, VENUES, VENUE_IDS, type ChainKey, type VenueId } from "./config";
+import { GAS_MIN, STOCK_TOKEN_EXCLUDED, VENUES, VENUE_IDS, type ChainKey, type VenueId } from "./config";
 import type { Eligibility, Position, Preference, Profile, ReasonCode, Risk, Split, Trigger } from "./types";
 
 export type RuleInputs = {
   ixs: { paused: boolean; whitelistEnabled: boolean; agentWhitelisted: boolean };
   usMarketOpen: boolean;
-  /** Idle stablecoins the executing wallet holds per chain (USD). Omitted = not constrained (planning only). */
+  /** Idle stablecoins the executing wallet holds per chain (USD). Omitted = not constrained (demo planning). */
   chainFunds?: Partial<Record<ChainKey, number>>;
+  /** Native gas the executing wallet holds per chain. Omitted = not checked. */
+  chainGas?: Partial<Record<ChainKey, number>>;
 };
 
 const VOLATILE_CAP: Record<Preference, Record<Risk, number>> = {
@@ -63,6 +65,7 @@ export function eligibility(profile: Profile, inputs: RuleInputs): Record<VenueI
       if (!out[id].allowed || id === "rh_stocks") continue;
       const funds = inputs.chainFunds[VENUES[id].chain] ?? 0;
       if (funds < VENUES[id].minUsd) { block(id, "NO_FUNDS_ON_CHAIN"); continue; }
+      if (inputs.chainGas && (inputs.chainGas[VENUES[id].chain] ?? 0) < GAS_MIN[VENUES[id].chain]) { block(id, "NO_GAS_ON_CHAIN"); continue; }
       out[id].maxPct = Math.min(out[id].maxPct, Math.floor((funds / profile.amountUsd) * 100));
       if (out[id].maxPct < 100) out[id].reasons.push("NO_FUNDS_ON_CHAIN");
     }

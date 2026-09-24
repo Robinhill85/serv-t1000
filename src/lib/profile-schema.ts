@@ -22,4 +22,6 @@ export const GuardRequestSchema = z.object({
   legs: z.array(LegSchema).min(1).max(4),
   entry: z.object({ at: z.number(), ethPriceUsd: z.number().nullable(), idleUsd: z.number().nullable() }),
   scenario: z.object({ ethMult: z.number().min(0.2).max(3) }).nullable().default(null),
+  /** "My wallet" Guard: whose positions to read. Omitted = the operator's agent wallet. */
+  address: AddressSchema.optional(),
 });

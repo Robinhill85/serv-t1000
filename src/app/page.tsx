@@ -7,6 +7,7 @@ import { LiquidScene, rebalanceLegs } from "@/components/LiquidScene";
 import { LiquidPreview } from "@/components/LiquidPreview";
 import { useState, useSyncExternalStore } from "react";
 import { useT1000 } from "@/lib/use-t1000";
+import { WalletProvider } from "@/components/WalletProvider";
 
 const subscribe = () => () => {};
 const readPreview = () => {
@@ -24,7 +25,7 @@ export default function Home() {
   const guardActions: GuardActions = {
     enter: t.enterGuard, scan: () => void t.scanGuard(), setSource: t.setGuardSource, setScenario: t.setScenario,
     feed: t.feed, cancelFeed: t.cancelFeed, propose: () => void t.proposeRebalance(), executeMoves: (m, p) => void t.executeMoves(m, p),
-    applyMoves: t.applyMoves, dismiss: t.dismissRebalance, resume: t.resumeGuard,
+    applyMoves: t.applyMoves, dismiss: t.dismissRebalance, resume: (address?: string) => t.resumeGuard(address),
   };
 
   const g = state.guard;
@@ -33,7 +34,7 @@ export default function Home() {
 
   if (preview) return <main className="liquid-preview"><LiquidPreview mode={preview} /></main>;
   return (
-    <>
+    <WalletProvider>
     <Intro src="/intro/t1000-intro.mp4" poster="/intro/t1000-intro-poster.jpg" />
     <main className="split">
       <section className="split-visual" aria-label="Allocation vision">
@@ -50,9 +51,9 @@ export default function Home() {
         )}
       </section>
       <section className="split-chat" aria-label="Agent chat">
-        <Chat key={take} state={state} onScan={t.scanWallet} onRun={t.run} onReset={restart} onExecute={t.executePlan} guard={guardActions} />
+        <Chat key={take} state={state} onScan={t.scanWallet} onRun={t.run} onReset={restart} onExecute={t.executePlan} onExecuteWallet={(m, p, pr) => void t.executeWithWallet(m, p, pr)} guard={guardActions} />
       </section>
     </main>
-    </>
+    </WalletProvider>
   );
 }

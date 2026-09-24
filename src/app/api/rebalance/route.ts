@@ -37,7 +37,7 @@ export async function POST(req: Request) {
           } else {
             const check = checkMoves(decision.moves, g.positions, g.idleByChain, body.profile, { ixsRedeemMinUsd: await ixsRedeemMinUsd() });
             const signable = check.errors.length === 0 && check.executable.length > 0 && !!verified.value;
-            const signed = signable ? signMoves({ moves: check.executable, source: body.source, scenario: !!body.scenario }) : null;
+            const signed = signable ? signMoves({ moves: check.executable, source: body.source, scenario: !!body.scenario, wallet: body.address }) : null;
             send({ type: "move_plan", summary: decision.summary, moves: decision.moves, check, verified: !!verified.value, iat: signed?.iat, planToken: signed?.token });
           }
         }

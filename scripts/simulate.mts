@@ -10,7 +10,7 @@ const legs = Object.entries(amounts).filter(([, v]) => v > 0).map(([venue, usd])
 const agent = agentAccount().address;
 console.log(`agent ${agent}, legs ${JSON.stringify(legs)}`);
 const steps = await buildSteps(legs, agent);
-for (const r of await simulate(steps, agent)) console.log(`${r.ok ? "OK  " : "FAIL"} [${r.chain}] ${r.label}: ${r.detail}`);
+for (const r of await simulate(steps, agent, undefined, { injectBalances: true })) console.log(`${r.ok ? "OK  " : "FAIL"} [${r.chain}] ${r.label}: ${r.detail}`);
 
 // Guard-mode moves: `npx tsx --env-file=.env.local scripts/simulate.mts moves`
 if (process.argv.includes("moves")) {
@@ -25,5 +25,5 @@ if (process.argv.includes("moves")) {
     { from: "ixs", to: "idle", usd: Math.max(50, min), bridge_required: false, why: "" },
   ] as never;
   const mSteps = await buildMoveSteps(moves, agent, s.rhEth.priceUsd!);
-  for (const r of await simulate(mSteps, agent)) console.log(`${r.ok ? "OK  " : "FAIL"} [${r.chain}] ${r.label}: ${r.detail}`);
+  for (const r of await simulate(mSteps, agent, undefined, { injectBalances: true })) console.log(`${r.ok ? "OK  " : "FAIL"} [${r.chain}] ${r.label}: ${r.detail}`);
 }
