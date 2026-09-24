@@ -11,6 +11,7 @@ const X = [18, 50, 82];
 
 const usd = (n: number | null | undefined, d = 2) =>
   n == null ? "N/A" : "$" + n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+const SHORT: Record<VenueId, string> = { base: "BASE", ixs: "IXS", rh_eth: "ETH", rh_stocks: "STOCKS" };
 const clock = (sec: number) => `${String(Math.floor(sec / 60)).padStart(2, "0")}:${String(sec % 60).padStart(2, "0")}`;
 const endName = (e: string) => (e === "idle" ? "IDLE" : VENUES[e as VenueId].hud);
 
@@ -49,8 +50,11 @@ export function GuardHud({ guard }: { guard: GuardView }) {
   const s = data?.signals;
   const maxDrift = ORDER.reduce((m, v) => Math.max(m, total > 0 && positions.some((p) => p.venue === v) ? Math.abs(weight(v) - target(v)) : 0), 0);
   const fresh = data ? data.idleUsd - data.idleAtDeployUsd : 0;
+  // Short form so the row fits at stream size: "ETH 15.9% VS 10% TARGET".
+  const drift = alerts.find((t) => t.code === "DRIFT");
+  const driftText = drift ? (drift.venue ? `${SHORT[drift.venue]} ${weight(drift.venue).toFixed(1)}% VS ${target(drift.venue)}% TARGET` : drift.detail) : null;
   const watch = [
-    { code: "DRIFT", alert: alerts.some((t) => t.code === "DRIFT"), text: alerts.find((t) => t.code === "DRIFT")?.detail ?? `MAX ${maxDrift.toFixed(1)}PP OF ${DRIFT_PP}PP` },
+    { code: "DRIFT", alert: alerts.some((t) => t.code === "DRIFT"), text: driftText ?? `MAX ${maxDrift.toFixed(1)}PP OF ${DRIFT_PP}PP` },
     { code: "YIELD GAP", alert: alerts.some((t) => t.code === "YIELD_GAP"), text: s ? `IXS ${s.ixs.estYieldPct}% VS BASE ${s.base.netApyPct ?? "N/A"}% (MIN ${YIELD_GAP_PP}PP)` : "PENDING" },
     { code: "VAULT RULES", alert: alerts.some((t) => t.code === "VAULT_RULE"), text: s ? `PAUSE ${s.ixs.paused ? "ON" : "OFF"} · WHITELIST ${s.ixs.whitelistEnabled ? "ON" : "OFF"} · NAV ${s.ixs.navFresh === false ? "STALE" : "FRESH"}` : "PENDING" },
     { code: "NEW CASH", alert: !!newCash, text: data ? `IDLE ${usd(data.idleUsd)} (${fresh >= 0 ? "+" : ""}${usd(fresh)} VS ${usd(NEW_CASH_USD, 0)} MIN)` : "PENDING" },

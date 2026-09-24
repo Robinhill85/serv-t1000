@@ -1,5 +1,5 @@
 "use client";
-// Cold open: plays once per browser session, skippable from the first frame. The last beat (the pupil opening
+// Cold open: plays once per browser session (and again on Restart), skippable from the first frame. The last beat (the pupil opening
 // into the HUD) is done here in code, so it lands exactly on the live interface rather than a baked frame.
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -10,6 +10,14 @@ export const INTRO_DONE_EVENT = "t1000:intro-done";
 function markDone() {
   (window as unknown as { __t1000IntroDone?: boolean }).__t1000IntroDone = true;
   window.dispatchEvent(new Event(INTRO_DONE_EVENT));
+}
+const REPLAY_EVENT = "t1000:intro-replay";
+/** Restart from the top: the intro plays again and whenIntroDone waits for it (unless the URL has intro=0). */
+export function replayIntro() {
+  try { sessionStorage.removeItem(SEEN_KEY); } catch { /* ignore */ }
+  if (new URLSearchParams(window.location.search).get("intro") === "0") { markDone(); return; }
+  (window as unknown as { __t1000IntroDone?: boolean }).__t1000IntroDone = false;
+  window.dispatchEvent(new Event(REPLAY_EVENT));
 }
 export function whenIntroDone(cb: () => void) {
   if ((window as unknown as { __t1000IntroDone?: boolean }).__t1000IntroDone) cb();
@@ -31,6 +39,16 @@ export function Intro({ src, poster }: { src: string; poster?: string }) {
     return () => cancelAnimationFrame(id);
   }, []);
 
+  useEffect(() => {
+    const replay = () => {
+      const v = videoRef.current;
+      if (v) v.currentTime = 0;
+      setStage("playing");
+    };
+    window.addEventListener(REPLAY_EVENT, replay);
+    return () => window.removeEventListener(REPLAY_EVENT, replay);
+  }, []);
+
   const open = useCallback(() => {
     try { sessionStorage.setItem(SEEN_KEY, "1"); } catch { /* ignore */ }
     setStage("opening");
@@ -40,7 +58,9 @@ export function Intro({ src, poster }: { src: string; poster?: string }) {
   // Autoplay can be refused (power saving, strict browser settings): open straight into the HUD instead of freezing.
   useEffect(() => {
     if (stage !== "playing") return;
-    videoRef.current?.play().catch(() => open());
+    const v = videoRef.current;
+    if (v) v.currentTime = 0;
+    v?.play().catch(() => open());
   }, [stage, open]);
 
   if (stage === "hidden") return null;

@@ -2,10 +2,10 @@
 import { Chat, type GuardActions } from "@/components/Chat";
 import { GuardHud } from "@/components/GuardHud";
 import { Hud } from "@/components/Hud";
-import { Intro } from "@/components/Intro";
+import { Intro, replayIntro } from "@/components/Intro";
 import { LiquidScene, rebalanceLegs } from "@/components/LiquidScene";
 import { LiquidPreview } from "@/components/LiquidPreview";
-import { useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { useT1000 } from "@/lib/use-t1000";
 
 const subscribe = () => () => {};
@@ -18,6 +18,9 @@ export default function Home() {
   const t = useT1000();
   const { state } = t;
   const preview = useSyncExternalStore(subscribe, readPreview, () => null);
+  // Restart = a fresh visit: clear the run, replay the intro, and remount the chat (a ?demo= script plays again).
+  const [take, setTake] = useState(0);
+  const restart = () => { t.reset(); replayIntro(); setTake((n) => n + 1); };
   const guardActions: GuardActions = {
     enter: t.enterGuard, scan: () => void t.scanGuard(), setSource: t.setGuardSource, setScenario: t.setScenario,
     feed: t.feed, cancelFeed: t.cancelFeed, propose: () => void t.proposeRebalance(), executeMoves: (m, p) => void t.executeMoves(m, p),
@@ -47,7 +50,7 @@ export default function Home() {
         )}
       </section>
       <section className="split-chat" aria-label="Agent chat">
-        <Chat state={state} onScan={t.scanWallet} onRun={t.run} onReset={t.reset} onExecute={t.executePlan} guard={guardActions} />
+        <Chat key={take} state={state} onScan={t.scanWallet} onRun={t.run} onReset={restart} onExecute={t.executePlan} guard={guardActions} />
       </section>
     </main>
     </>

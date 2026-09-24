@@ -123,10 +123,17 @@ export function useT1000() {
   const [state, setState] = useState<RunState>(initial);
   const abortRef = useRef<AbortController | null>(null);
   const scanSeq = useRef(0);
+  // Bumped by reset: streams still running from before a restart stop writing into the new session.
+  const epoch = useRef(0);
   // Actions read the latest committed state from here (they run from handlers and timers, never during render).
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
   const setGuard = useCallback((f: (g: GuardView) => GuardView) => setState((s) => (s.guard ? { ...s, guard: f(s.guard) } : s)), []);
+  /** setGuard for async work started in one session: a no-op once Restart has begun a new one. */
+  const guardWriter = useCallback(() => {
+    const ep = epoch.current;
+    return (f: (g: GuardView) => GuardView) => { if (epoch.current === ep) setGuard(f); };
+  }, [setGuard]);
 
   const scanWallet = useCallback(async (address: string) => {
     setState({ ...initial, phase: "scanning_wallet" });
@@ -181,9 +188,10 @@ export function useT1000() {
   /** Runs the signed plan: "simulate" for anyone (nothing is sent), "live" with the operator passcode. */
   const executePlan = useCallback(async (mode: "simulate" | "live", plan: RunState["plan"], profile: Profile | null, passcode?: string) => {
     if (!plan?.planToken || !profile) return;
+    const ep = epoch.current;
     const blank: Execution = { mode, status: "running", checks: [], steps: [] };
     setState((s) => ({ ...s, execution: blank }));
-    const fail = (error: string) => setState((s) => ({ ...s, execution: { ...(s.execution ?? blank), status: "failed", error } }));
+    const fail = (error: string) => { if (epoch.current === ep) setState((s) => ({ ...s, execution: { ...(s.execution ?? blank), status: "failed", error } })); };
     try {
       const res = await fetch("/api/execute", {
         method: "POST",
@@ -191,7 +199,7 @@ export function useT1000() {
         body: JSON.stringify({ mode, profile, legs: plan.legs, iat: plan.iat, planToken: plan.planToken, passcode }),
       });
       if (!res.ok || !res.body) { fail((await res.json().catch(() => ({}))).error ?? "Execution failed."); return; }
-      await readSse(res, (e) => setState((s) => ({ ...s, execution: applyExec(s.execution ?? blank, e) })));
+      await readSse(res, (e) => { if (epoch.current === ep) setState((s) => ({ ...s, execution: applyExec(s.execution ?? blank, e) })); });
     } catch (e) {
       fail(e instanceof Error ? e.message : "Execution failed.");
     }
@@ -290,12 +298,13 @@ export function useT1000() {
   const proposeRebalance = useCallback(async () => {
     const g = stateRef.current.guard;
     if (!g) return;
-    setGuard((x) => ({ ...x, rebalance: { status: "running" }, moves: null, movesFrom: null }));
-    const fail = (error: string) => setGuard((x) => ({ ...x, rebalance: { ...(x.rebalance ?? {}), status: "error", error } }));
+    const write = guardWriter();
+    write((x) => ({ ...x, rebalance: { status: "running" }, moves: null, movesFrom: null }));
+    const fail = (error: string) => write((x) => ({ ...x, rebalance: { ...(x.rebalance ?? {}), status: "error", error } }));
     try {
       const res = await fetch("/api/rebalance", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(guardRequest(g.session)) });
       if (!res.ok || !res.body) { fail((await res.json().catch(() => ({}))).error ?? "Rebalance failed."); return; }
-      await readSse(res, (e) => setGuard((x) => {
+      await readSse(res, (e) => write((x) => {
         const rb: RebalanceView = x.rebalance ?? { status: "running" };
         switch (e.type) {
           case "guard": return { ...x, data: e.guard as GuardState, lastScanAt: Date.now() };
@@ -309,20 +318,21 @@ export function useT1000() {
           default: return x;
         }
       }));
-      setGuard((x) => (x.rebalance?.status === "running" ? { ...x, rebalance: { ...x.rebalance, status: "error", error: "SERV returned no proposal." } } : x));
+      write((x) => (x.rebalance?.status === "running" ? { ...x, rebalance: { ...x.rebalance, status: "error", error: "SERV returned no proposal." } } : x));
     } catch (e) {
       fail(e instanceof Error ? e.message : "Rebalance failed.");
     }
-  }, [setGuard]);
+  }, [guardWriter]);
 
   /** Runs the signed moves: simulate for anyone; live only with the passcode, on real positions, never a scenario. */
   const executeMoves = useCallback(async (mode: "simulate" | "live", passcode?: string) => {
     const g = stateRef.current.guard;
     const plan = g?.rebalance?.plan;
     if (!g || !plan?.planToken) return;
+    const write = guardWriter();
     const blank: Execution = { mode, status: "running", checks: [], steps: [] };
-    setGuard((x) => ({ ...x, moves: blank, movesFrom: x.data?.positions ?? null }));
-    const fail = (error: string) => setGuard((x) => ({ ...x, moves: { ...(x.moves ?? blank), status: "failed", error } }));
+    write((x) => ({ ...x, moves: blank, movesFrom: x.data?.positions ?? null }));
+    const fail = (error: string) => write((x) => ({ ...x, moves: { ...(x.moves ?? blank), status: "failed", error } }));
     try {
       const res = await fetch("/api/execute", {
         method: "POST",
@@ -330,11 +340,11 @@ export function useT1000() {
         body: JSON.stringify({ kind: "moves", mode, moves: plan.check.executable, guard: guardRequest(g.session), iat: plan.iat, planToken: plan.planToken, passcode }),
       });
       if (!res.ok || !res.body) { fail((await res.json().catch(() => ({}))).error ?? "Execution failed."); return; }
-      await readSse(res, (e) => setGuard((x) => ({ ...x, moves: applyExec(x.moves ?? blank, e) })));
+      await readSse(res, (e) => write((x) => ({ ...x, moves: applyExec(x.moves ?? blank, e) })));
     } catch (e) {
       fail(e instanceof Error ? e.message : "Execution failed.");
     }
-  }, [setGuard]);
+  }, [guardWriter]);
 
   /** After the moves finish: simulated positions take the moves on board; live positions are simply re-read. */
   const applyMoves = useCallback(() => {
@@ -382,7 +392,7 @@ export function useT1000() {
     return () => clearTimeout(id);
   }, [watching, lastScanAt, scanGuard]);
 
-  const reset = useCallback(() => { abortRef.current?.abort(); scanSeq.current++; setState(initial); }, []);
+  const reset = useCallback(() => { abortRef.current?.abort(); scanSeq.current++; epoch.current++; setState(initial); }, []);
   return {
     state, scanWallet, run, reset, executePlan,
     enterGuard, scanGuard, setGuardSource, setScenario, feed, cancelFeed, proposeRebalance, executeMoves, applyMoves, dismissRebalance, resumeGuard,

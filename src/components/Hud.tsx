@@ -38,24 +38,25 @@ function JevBar({ name, s }: { name: string; s?: JevScore }) {
   );
 }
 
+/** Two to four short lines per target: kept brief so they stay readable at stream size. */
 function targetParams(id: VenueId, st: RunState): string[] {
   const s = st.signals;
   if (!s) return [];
   switch (id) {
     case "base":
-      return [`NET APY ${s.base.netApyPct ?? "N/A"}%`, `TVL ${compactUsd(s.base.tvlUsd)}`, "WITHDRAW INSTANT"];
+      return [`APY ${s.base.netApyPct ?? "N/A"}%`, `TVL ${compactUsd(s.base.tvlUsd)}`, "EXIT INSTANT"];
     case "ixs":
       return [
-        `EST YIELD ${s.ixs.estYieldPct}%`,
-        `SETTLE ${s.ixs.settlement.includes("T+1") ? "T+1 / T+2 WKND" : s.ixs.settlement}`,
-        `EXIT ${s.ixs.exitFeeBps ?? "N/A"}BPS  MIN ${usd(s.ixs.minUsd)}`,
-        `WHITELIST ${s.ixs.whitelistEnabled ? "ON" : "OFF"}  NAV ${s.ixs.navFresh ? "FRESH" : "STALE"}`,
+        `YIELD ${s.ixs.estYieldPct}%`,
+        `SETTLES ${s.ixs.settlement.includes("T+1") ? "T+1" : s.ixs.settlement}`,
+        `MIN ${usd(s.ixs.minUsd)} · FEE ${s.ixs.exitFeeBps == null ? "N/A" : `${s.ixs.exitFeeBps / 100}%`}`,
+        `WHITELIST ${s.ixs.whitelistEnabled ? "ON" : "OFF"}`,
       ];
     case "rh_eth":
       return [
-        `ETH ${usd(s.rhEth.priceUsd, 2)}`,
-        `POOL DEPTH ${compactUsd(s.rhEth.poolUsdgDepth)}`,
+        `ETH ${usd(s.rhEth.priceUsd)}`,
         `7D ${s.rhEth.change7dPct == null ? "N/A" : (s.rhEth.change7dPct > 0 ? "+" : "") + s.rhEth.change7dPct + "%"}`,
+        `DEPTH ${compactUsd(s.rhEth.poolUsdgDepth)}`,
       ];
     case "rh_stocks":
       return [s.market.session.split(":")[0].toUpperCase(), s.market.weekend ? "ORACLES FROZEN" : "ORACLES 24/5"];
@@ -139,7 +140,7 @@ export function Hud({ state }: { state: RunState }) {
         </div>
         <div className="hud-right">
           <div className="hud-label">PARAMETERS:</div>
-          <NoiseColumn rows={5} seed={2} />
+          <NoiseColumn rows={3} seed={2} />
         </div>
       </header>
 

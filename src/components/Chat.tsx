@@ -111,7 +111,7 @@ function ExecutionView({ ex, title }: { ex: Execution; title: string }) {
 
 const DEMO_WALLET = "0x2C12CF9dcb6C4958216e7eCe4c71a2Ebc3db358a";
 const DEMOS: Record<string, Profile> = {
-  uk: { residence: "UK", amountUsd: 150, horizon: "3_12m", risk: "medium", instantAccess: false, preference: "mixed", goal: "Park my idle stables for 6 months, a little ETH upside is fine" },
+  uk: { residence: "UK", amountUsd: 150, horizon: "3_12m", risk: "medium", instantAccess: false, preference: "mixed", goal: "Park my idle stables for 6 months, I'd like about 10% in ETH for upside" },
   "uk-instant": { residence: "UK", amountUsd: 150, horizon: "1_3m", risk: "low", instantAccess: true, preference: "stable", goal: "Emergency fund, I might need it any day" },
   us: { residence: "US", amountUsd: 150, horizon: "over_1y", risk: "high", instantAccess: false, preference: "volatile", goal: "Grow it, I can stomach swings" },
 };
@@ -288,7 +288,7 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, guard: G }: {
     <div className="chat">
       <div className="chat-head">
         <span className="chat-dot" /> T1000 agent
-        <button className="chat-reset" onClick={() => { onReset(); setMsgs(msgs.slice(0, 1)); setStep(-1); setProfile({}); }}>Restart</button>
+        <button className="chat-reset" onClick={onReset} title="Start again from the intro">Restart</button>
       </div>
 
       <div className="chat-log" ref={logRef}>
