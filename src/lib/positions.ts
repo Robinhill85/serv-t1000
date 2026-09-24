@@ -16,6 +16,31 @@ const vault4626 = parseAbi([
 ]);
 
 /** idleUsd: the agent's idle stables right after deploy; null until the first Guard scan sets the baseline. */
+const ixsRequestAbi = parseAbi([
+  "function nextDepositRequestId() view returns (uint256)",
+  "function pendingDepositRequest(uint256 requestId, address controller) view returns (uint256)",
+]);
+
+/**
+ * The agent's pending IXS deposits, read from the vault itself. The SDK resolves request ids through a subgraph that
+ * can lag (first live run: request #9 was on the vault but the SDK saw nothing). Request ids are sequential, so the
+ * last `lookback` ids cover any deposit still waiting for its T+1 settlement.
+ */
+async function ixsPendingFromVault(c: PublicClient, vault: Address, agent: Address, lookback = 25): Promise<bigint | null> {
+  try {
+    const last = await c.readContract({ address: vault, abi: ixsRequestAbi, functionName: "nextDepositRequestId" });
+    const ids: bigint[] = [];
+    for (let id = last; id >= 1n && ids.length < lookback; id--) ids.push(id);
+    const res = await c.multicall({
+      contracts: ids.map((id) => ({ address: vault, abi: ixsRequestAbi, functionName: "pendingDepositRequest" as const, args: [id, agent] as const })),
+      allowFailure: true,
+    });
+    return res.reduce((a, r) => a + (r.status === "success" ? (r.result as bigint) : 0n), 0n);
+  } catch {
+    return null;
+  }
+}
+
 export type Entry = { at: number; ethPriceUsd: number | null; idleUsd: number | null };
 export type Scenario = { ethMult: number } | null;
 
@@ -30,8 +55,9 @@ export async function readAgentPositions(agent: Address, s: Signals, scenario: S
   const rh = publicClient("robinhood");
   const ixsVault = KNOWN_VAULTS["avax-ixhyb"];
 
-  const [ixsPos, morphoShares, weth, scan] = await Promise.all([
+  const [ixsPos, ixsVaultPending, morphoShares, weth, scan] = await Promise.all([
     readUserPosition(avax as unknown as Parameters<typeof readUserPosition>[0], ixsVault, agent, TOKENS.avalanche.USDC).catch(() => null),
+    ixsPendingFromVault(avax as PublicClient, ixsVault.address as Address, agent),
     baseC.readContract({ address: VENUES.base.address!, abi: vault4626, functionName: "balanceOf", args: [agent] }).catch(() => 0n),
     rh.readContract({ address: TOKENS.robinhood.WETH, abi: erc20Abi, functionName: "balanceOf", args: [agent] }).catch(() => 0n),
     scanWallet(agent),
@@ -43,7 +69,9 @@ export async function readAgentPositions(agent: Address, s: Signals, scenario: S
     const assets = await (avax as PublicClient).readContract({ address: ixsVault.address, abi: vault4626, functionName: "convertToAssets", args: [ixsPos.shareBalance] });
     ixsShares = Number(formatUnits(assets, 6));
   }
-  const ixsPending = ixsPos?.pendingDeposit ? Number(formatUnits(ixsPos.pendingDeposit, 6)) : 0;
+  // The vault's own record wins; the SDK's figure is the fallback if the vault read failed.
+  const pendingRaw = ixsVaultPending ?? ixsPos?.pendingDeposit ?? 0n;
+  const ixsPending = Number(formatUnits(pendingRaw, 6));
   const ixsUsd = ixsShares + ixsPending;
 
   // Base: Morpho ERC-4626 shares to assets.

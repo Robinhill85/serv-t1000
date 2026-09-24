@@ -11,10 +11,11 @@ import {
   createWalletClient, encodeAbiParameters, encodeFunctionData, formatUnits, keccak256, maxUint256, numberToHex, pad, parseAbi, parseUnits,
   type Abi, type Address, type Hex,
 } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+import { nonceManager, privateKeyToAccount } from "viem/accounts";
 import { CHAINS, TOKENS, UNISWAP_RH, VENUES, type ChainKey, type VenueId } from "./config";
 import { erc20Abi, publicClient, transport } from "./clients";
 import type { Move } from "./rebalance";
+import { isRetryableEstimateError, RETRY_DELAY_MS, SEND_ATTEMPTS } from "./exec-retry";
 import type { Leg } from "./types";
 
 export type Step = {
@@ -48,7 +49,8 @@ const SWAP_SLIPPAGE_BPS = 50n;
 export function agentAccount() {
   const pk = process.env.AGENT_PRIVATE_KEY as Hex | undefined;
   if (!pk) throw new Error("Live runs are not available on this deployment.");
-  return privateKeyToAccount(pk);
+  // The nonce manager remembers the last nonce it used, so a lagging RPC node cannot hand out a stale one.
+  return privateKeyToAccount(pk, { nonceManager });
 }
 
 /** The agent's public address: enough to read positions and simulate. Prefers AGENT_ADDRESS (no key needed). */
@@ -286,7 +288,20 @@ async function provider(chain: ChainKey) {
 }
 
 /** Sends every step through AgentKit, in order, waiting for each receipt. Stops at the first failure. */
+/** Waits (up to 20s) until the chain shows the allowance a step spends; the approve may be on a node ahead of this one. */
+async function waitForAllowance(s: Step, owner: Address, timeoutMs = 20_000) {
+  const t0 = Date.now();
+  for (;;) {
+    const a = await publicClient(s.chain)
+      .readContract({ address: s.spends!.token, abi: erc20Abi, functionName: "allowance", args: [owner, s.spends!.spender] })
+      .catch(() => 0n);
+    if (a >= s.spends!.amount || Date.now() - t0 > timeoutMs) return;
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+}
+
 export async function execute(steps: Step[], onStep: (r: StepResult) => void): Promise<StepResult[]> {
+  const account = agentAccount().address;
   const results: StepResult[] = [];
   const providers = new Map<ChainKey, ViemWalletProvider>();
   for (const s of steps) {
@@ -294,7 +309,17 @@ export async function execute(steps: Step[], onStep: (r: StepResult) => void): P
     providers.set(s.chain, p);
     try {
       const data = encodeFunctionData({ abi: s.abi, functionName: s.functionName, args: s.args } as never);
-      const hash = await p.sendTransaction({ to: s.to, data });
+      if (s.spends) await waitForAllowance(s, account);
+      let hash: Hex | undefined;
+      for (let attempt = 1; !hash; attempt++) {
+        try {
+          hash = await p.sendTransaction({ to: s.to, data });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (attempt >= SEND_ATTEMPTS || !isRetryableEstimateError(msg)) throw e;
+          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        }
+      }
       const receipt = await p.waitForTransactionReceipt(hash);
       const ok = receipt?.status === "success";
       const r: StepResult = { venue: s.venue, chain: s.chain, label: s.label, ok, hash, explorer: `${CHAINS[s.chain].explorer}/tx/${hash}`, detail: ok ? "Confirmed" : "Reverted" };
