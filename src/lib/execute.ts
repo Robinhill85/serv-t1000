@@ -13,6 +13,7 @@ import {
 } from "viem";
 import { nonceManager, privateKeyToAccount } from "viem/accounts";
 import { CHAINS, TOKENS, UNISWAP_RH, VENUES, type ChainKey, type VenueId } from "./config";
+import { publicError } from "./public-error";
 import { erc20Abi, publicClient, transport } from "./clients";
 import type { Move } from "./rebalance";
 import { isRetryableEstimateError, RETRY_DELAY_MS, SEND_ATTEMPTS } from "./exec-retry";
@@ -358,7 +359,7 @@ export async function simulate(steps: Step[], agent: Address, onStep?: (r: StepR
       const note = injected ? " (position injected for simulation)" : balanceInjected ? " (balance injected for simulation)" : "";
       push({ venue: s.venue, chain: s.chain, label: s.label, ok: true, detail: (gas ? `Simulated OK, ~${gas} gas` : "Simulated OK") + note, gas: gas?.toString() });
     } catch (e) {
-      const msg = e instanceof Error ? (e as { shortMessage?: string }).shortMessage ?? e.message : String(e);
+      const msg = publicError(e, String(e));
       push({ venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: msg.slice(0, 240) });
     }
   }
@@ -421,7 +422,7 @@ export async function execute(steps: Step[], onStep: (r: StepResult) => void): P
       onStep(r);
       if (!ok) break;
     } catch (e) {
-      const r: StepResult = { venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: (e instanceof Error ? e.message : String(e)).slice(0, 240) };
+      const r: StepResult = { venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: publicError(e, "Transaction failed.", 240) };
       results.push(r);
       onStep(r);
       break;

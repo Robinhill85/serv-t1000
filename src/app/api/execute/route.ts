@@ -10,6 +10,7 @@ import { passcodeOk, verifyMoves, verifyPlan } from "@/lib/plan-token";
 import { GuardRequestSchema, ProfileSchema } from "@/lib/profile-schema";
 import { MOVE_ENDS } from "@/lib/rebalance";
 import { eligibility } from "@/lib/rulebook";
+import { publicError } from "@/lib/public-error";
 import { scanWallet } from "@/lib/scan";
 import { getSignals } from "@/lib/signals";
 
@@ -49,7 +50,7 @@ function stream(run: (send: (e: ExecuteEvent) => void) => Promise<void>) {
   return new Response(new ReadableStream({
     async start(controller) {
       const send = (e: ExecuteEvent) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(e)}\n\n`));
-      try { await run(send); } catch (err) { send({ type: "error", message: err instanceof Error ? err.message.slice(0, 300) : "Execution failed." }); }
+      try { await run(send); } catch (err) { send({ type: "error", message: publicError(err, "Execution failed.") }); }
       controller.close();
     },
   }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform" } });

@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { askT1000 } from "@/lib/ask";
 import { rateAllow } from "@/lib/ask-shape";
+import { clientIp } from "@/lib/limits";
 
 export const runtime = "nodejs";
 export const maxDuration = 45;
@@ -18,8 +19,7 @@ export async function POST(req: Request) {
   const parsed = Body.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return Response.json({ ok: false, error: "Ask a question of up to 400 characters." }, { status: 400 });
   if (JSON.stringify(parsed.data.context ?? {}).length > 8000) return Response.json({ ok: false, error: "Too much context." }, { status: 400 });
-  const ip = (req.headers.get("x-forwarded-for") ?? "").split(",")[0].trim() || "local";
-  if (!rateAllow(hits, ip, Date.now())) return Response.json({ ok: false, error: "That's a lot of questions. Give it a few minutes." }, { status: 429 });
+  if (!rateAllow(hits, clientIp(req), Date.now())) return Response.json({ ok: false, error: "That's a lot of questions. Give it a few minutes." }, { status: 429 });
 
   const r = await askT1000(parsed.data.question, parsed.data.context ?? {});
   if (!r.ok || !r.value) return Response.json({ ok: false, error: "I couldn't answer that just now. Try again in a moment." }, { status: 502 });

@@ -1,4 +1,5 @@
 import { guardState } from "@/lib/guard";
+import { publicError } from "@/lib/public-error";
 import { GuardRequestSchema } from "@/lib/profile-schema";
 
 export const runtime = "nodejs";
@@ -10,6 +11,6 @@ export async function POST(req: Request) {
   try {
     return Response.json(await guardState(parsed.data));
   } catch (e) {
-    return Response.json({ error: e instanceof Error ? e.message : "Guard scan failed." }, { status: 502 });
+    return Response.json({ error: publicError(e, "Guard scan failed.") }, { status: 502 });
   }
 }

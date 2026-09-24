@@ -19,7 +19,7 @@ export type ChainKey = "base" | "avalanche" | "robinhood";
 export const CHAINS: Record<ChainKey, { chain: Chain; alchemy: string; publicRpcs?: string[]; explorer: string }> = {
   base: { chain: base, alchemy: "base-mainnet", publicRpcs: ["https://base-rpc.publicnode.com", "https://mainnet.base.org"], explorer: "https://basescan.org" },
   avalanche: { chain: avalanche, alchemy: "avax-mainnet", publicRpcs: ["https://api.avax.network/ext/bc/C/rpc"], explorer: "https://snowtrace.io" },
-  robinhood: { chain: robinhood, alchemy: "robinhood-mainnet", explorer: "https://robinhoodchain.blockscout.com" },
+  robinhood: { chain: robinhood, alchemy: "robinhood-mainnet", publicRpcs: ["https://rpc.mainnet.chain.robinhood.com"], explorer: "https://robinhoodchain.blockscout.com" },
 };
 
 /** Native gas a wallet needs on a chain before T1000 plans a leg there (about 10x a four-transaction leg). */

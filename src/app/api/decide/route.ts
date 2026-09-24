@@ -7,6 +7,8 @@ import { agentAddress } from "@/lib/execute";
 import { runPipeline, type PipelineEvent } from "@/lib/pipeline";
 import { signPlan } from "@/lib/plan-token";
 import { AddressSchema, ProfileSchema } from "@/lib/profile-schema";
+import { overLimit } from "@/lib/limits";
+import { publicError } from "@/lib/public-error";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
@@ -15,7 +17,13 @@ function agent() {
   try { return agentAddress(); } catch { return undefined; }
 }
 
+const hits = new Map<string, number[]>(); // per server instance
+
 export async function POST(req: Request) {
+  // Each plan spends paid model calls (Jev + SERV draft + SERV verify): a kill switch and a per-visitor limit.
+  if (process.env.DECIDE_ENABLED === "false") return Response.json({ error: "Planning is switched off right now." }, { status: 503 });
+  const limited = overLimit(hits, req, 6, "That's a lot of plans in a row. Give it a few minutes.");
+  if (limited) return limited;
   let body: unknown;
   try { body = await req.json(); } catch { return Response.json({ error: "Invalid JSON." }, { status: 400 }); }
   const parsed = ProfileSchema.safeParse(body);
@@ -45,7 +53,7 @@ export async function POST(req: Request) {
       try {
         await runPipeline(parsed.data, sendSigned, wallet ? { agent: wallet, fundsFrom: wallet, limits: publicLimits() } : { agent: agent() });
       } catch (err) {
-        send({ type: "error", message: err instanceof Error ? err.message : "Pipeline failed." });
+        send({ type: "error", message: publicError(err, "Pipeline failed.") });
       }
       send({ type: "done" });
       controller.close();

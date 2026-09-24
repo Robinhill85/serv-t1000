@@ -5,12 +5,19 @@ import { guardState } from "@/lib/guard";
 import { checkMoves } from "@/lib/plan-guard";
 import { signMoves } from "@/lib/plan-token";
 import { GuardRequestSchema } from "@/lib/profile-schema";
+import { overLimit } from "@/lib/limits";
+import { publicError } from "@/lib/public-error";
 import { decideRebalance, rebalanceInput } from "@/lib/rebalance";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
 
+const hits = new Map<string, number[]>(); // per server instance
+
 export async function POST(req: Request) {
+  if (process.env.GUARD_ENABLED === "false") return Response.json({ error: "Rebalancing is switched off right now." }, { status: 503 });
+  const limited = overLimit(hits, req, 6, "That's a lot of rebalance requests. Give it a few minutes.");
+  if (limited) return limited;
   const parsed = GuardRequestSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return Response.json({ error: parsed.error.issues[0]?.message ?? "Invalid request." }, { status: 400 });
   const body = parsed.data;
@@ -42,7 +49,7 @@ export async function POST(req: Request) {
           }
         }
       } catch (e) {
-        send({ type: "error", message: e instanceof Error ? e.message.slice(0, 300) : "Rebalance failed." });
+        send({ type: "error", message: publicError(e, "Rebalance failed.") });
       }
       send({ type: "done" });
       controller.close();
