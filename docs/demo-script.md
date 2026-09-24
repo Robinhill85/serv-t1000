@@ -1,4 +1,4 @@
-# T1000 demo video: X cut (v3, with the Guard beat)
+# T1000 demo video: X cut (v4: final, 1.5× pace, 60s)
 
 **Where it lives:** the X submission post, which tags @openservai. The tweet text carries the explanation and links, and the video carries the visuals.
 
@@ -6,7 +6,9 @@
 - Autoplay is **muted** in the feed. Burned-in captions must tell the whole story without sound.
 - Voiceover is optional, for viewers who turn sound on (judges likely will).
 - Hook in the first 3 seconds: the intro's rising liquid metal does this.
-- Length about 85s (the X limit is 2:20). 1920×1080 H.264 + AAC.
+- The final is 60.3s. Everything is cut on the 1× timeline below, then played at 1.5× (Robin's pick); the voice is time-stretched with its pitch kept.
+- Build: `node scripts/build-demo.cjs --pace 1.5 --music assets/music/music-a-dark-industrial.m4a --out assets/cut/t1000-demo-final.mp4`.
+- Music: track A (Higgsfield Sonilo, dark industrial). It leads the intro, ramps to a bed about 15 dB under the voice, and dips further on every spoken line. 1920×1080 H.264 + AAC.
 
 **Assembly**
 - Prepend the intro file.
@@ -18,8 +20,8 @@
 |---|---|---|---|
 | 0:00–0:10 | Intro: the blob rises, the eyes ignite | **Your idle stablecoins.** | "Your stablecoins are sitting idle." |
 | 0:10–0:16 | The camera dives through the pupil into the HUD | **T1000 decides where they live.** | "T1000 decides where they should live." |
-| 0:16–0:26 | Wallet scan, then typing "all is fine" and "half a year" | **Tell it in your own words** | "Tell it what you want, in your own words." |
-| 0:26–0:40 | HUD sweep: live data, Stock Tokens struck through | **Live market scan · 3 chains** / **Blocked: UK jurisdiction** | "It scans live markets across three chains, and knows what you're not allowed to touch." |
+| 0:16–0:26 | Wallet scan, then typing "all is fine" and "half a year" | **Tell it in your own words**, then **Jev by TypeSafe classifies it · instantly** (on the "Got it: 3–12 months" read-back) | "Tell it what you want, in your own words." |
+| 0:26–0:40 | HUD sweep: live data, Stock Tokens struck through | **Live scan · 3 chains · Jev scores** / **Stock tokens blocked: UK rules** | "It scans live markets across three chains, and knows what you're not allowed to touch." |
 | 0:40–0:52 | "POSSIBLE ALLOCATION:" cursor, then the SHADOW AGENT CORRECTION stamp | **SERV reasons · Shadow Agent checks** | "SERV Reasoning drafts the split. A shadow agent checks it before any money moves." |
 | 0:52–1:04 | Approve, then the vaults fill; the step list turns green (plus an optional 3s live proof with tx links) | **AgentKit executes · 6 txs · 3 chains** | "Then the agent executes, onchain." |
 | 1:04–1:12 | Vision returns in GUARD MODE; the countdown ticks; watch list all OK | **It keeps watching** | "And it doesn't stop there. It keeps watching." |

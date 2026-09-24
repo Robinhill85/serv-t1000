@@ -1,6 +1,7 @@
 // Assembles the X demo cut: intro -> (pupil circle-open) -> take, with SERV waits sped up -> end card.
 // Captions are rendered as PNGs in a browser (this ffmpeg has no drawtext) and overlaid; VO lines are placed on beats.
-// Usage: PLAYWRIGHT=<playwright package> node scripts/build-demo.cjs [--music <file>] [--out <file>]
+// Usage: PLAYWRIGHT=<playwright package> node scripts/build-demo.cjs [--music <file>] [--pace 1.5] [--out <file>]
+// --pace speeds the whole cut (Robin's pick: 1.5x). Voice is time-stretched with pitch kept; music plays at its own tempo.
 const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -15,6 +16,7 @@ const VO_LINES = JSON.parse(fs.readFileSync(A("vo", "arthur-vo-v3.lines.json"), 
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : null; };
 const MUSIC = opt("--music");
+const PACE = +(opt("--pace") || 1);
 const OUT = opt("--out") || A("cut", "t1000-demo-rough.mp4");
 const WORK = A("cut", "work");
 fs.mkdirSync(WORK, { recursive: true });
@@ -35,15 +37,16 @@ const SEGMENTS = [
   { from: 70.0, to: 81.0, speed: 5 }, //  Shadow Agent verifying the moves
   { from: 81.0, to: 96.7, speed: 1 }, //  proposal, simulate moves, reverse flow, all clear
 ];
-const XFADE = 0.9; // pupil opening into the HUD
-const END_CARD = 4.8;
+const XFADE = 0.9 / PACE; // pupil opening into the HUD
+const END_CARD = PACE > 1 ? 3.8 : 4.8;
 
-// Output-time captions (seconds on the final timeline).
+// Captions and VO starts are written on the 1x timeline and divided by PACE.
 const CAPTIONS = [
   { t: [0.8, 7.6], text: "Your idle stablecoins." },
   { t: [8.4, 15.0], text: "T1000 decides where they live." },
-  { t: [18.8, 29.0], text: "Tell it in your own words" },
-  { t: [29.3, 34.0], text: "Live market scan · 3 chains" },
+  { t: [18.8, 22.7], text: "Tell it in your own words" },
+  { t: [22.8, 29.0], text: "Jev by TypeSafe classifies it · instantly" },
+  { t: [29.3, 34.0], text: "Live scan · 3 chains · Jev scores" },
   { t: [34.0, 37.5], text: "Stock tokens blocked: UK rules" },
   { t: [37.7, 45.5], text: "SERV reasons · Shadow Agent checks" },
   { t: [45.8, 52.0], text: "AgentKit · 6 txs · 3 chains" },
@@ -53,7 +56,7 @@ const CAPTIONS = [
   { t: [74.7, 79.6], text: "Trim ETH · same chain" },
   { t: [79.7, 85.5], text: "Back to plan: 70 / 20 / 10" },
 ];
-// Output-time start of each VO line (by beat).
+// Start of each VO line (by beat); "end" is placed on the end card instead.
 const VO_AT = { idle: 1.5, decides: 9.5, "own-words": 19.6, scan: 30.0, serv: 36.6, execute: 46.4, watch: 52.8, rebalance: 61.0, end: 86.6 };
 
 async function renderStills(bodyEnd) {
@@ -100,14 +103,14 @@ async function renderStills(bodyEnd) {
   // 1. Body: cut and retime take segments, then join.
   const segFiles = SEGMENTS.map((s, i) => {
     const f = path.join(WORK, `seg_${i}.mp4`);
-    ff(["-ss", String(s.from), "-to", String(s.to), "-i", TAKE, "-an", "-vf", `setpts=(PTS-STARTPTS)/${s.speed},fps=30,format=yuv420p`, "-c:v", "libx264", "-crf", "15", "-preset", "medium", f]);
+    ff(["-ss", String(s.from), "-to", String(s.to), "-i", TAKE, "-an", "-vf", `setpts=(PTS-STARTPTS)/${s.speed * PACE},fps=30,format=yuv420p`, "-c:v", "libx264", "-crf", "15", "-preset", "medium", f]);
     return f;
   });
   const list = path.join(WORK, "segs.txt");
   fs.writeFileSync(list, segFiles.map((f) => `file '${f}'`).join("\n") + "\n");
   const body = path.join(WORK, "body.mp4");
   ff(["-f", "concat", "-safe", "0", "-i", list, "-c", "copy", body]);
-  const introLen = dur(INTRO);
+  const introLen = dur(INTRO) / PACE;
   const bodyLen = dur(body);
   const bodyStart = introLen - XFADE;
   const bodyEnd = bodyStart + bodyLen;
@@ -120,18 +123,19 @@ async function renderStills(bodyEnd) {
   // 3. Video graph: intro -circleopen-> body -fade-> end card, then caption overlays.
   const inputs = ["-i", INTRO, "-i", body, "-loop", "1", "-t", String(END_CARD), "-i", card];
   caps.forEach((c) => inputs.push("-i", c));
-  let g = `[0:v]fps=30,format=yuv420p,settb=AVTB[i];[1:v]settb=AVTB[b];[2:v]fps=30,format=yuv420p,settb=AVTB[e];`;
+  let g = `[0:v]setpts=PTS/${PACE},fps=30,format=yuv420p,settb=AVTB[i];[1:v]settb=AVTB[b];[2:v]fps=30,format=yuv420p,settb=AVTB[e];`;
   g += `[i][b]xfade=transition=circleopen:duration=${XFADE}:offset=${bodyStart.toFixed(3)}[ib];`;
   g += `[ib][e]xfade=transition=fade:duration=0.6:offset=${(bodyEnd - 0.6).toFixed(3)}[v0];`;
-  CAPTIONS.forEach((c, i) => { g += `[v${i}][${3 + i}:v]overlay=0:0:enable='between(t,${c.t[0]},${c.t[1]})'[v${i + 1}];`; });
+  CAPTIONS.forEach((c, i) => { g += `[v${i}][${3 + i}:v]overlay=0:0:enable='between(t,${(c.t[0] / PACE).toFixed(3)},${(c.t[1] / PACE).toFixed(3)})'[v${i + 1}];`; });
   const vOut = `v${CAPTIONS.length}`;
 
   // 4. Audio: each VO line cut from Arthur's read and placed on its beat; optional music bed ducked under the voice.
   const voIdx = 3 + caps.length;
   inputs.push("-i", VO);
   VO_LINES.forEach((l, k) => {
-    const at = VO_AT[l.beat];
-    g += `[${voIdx}:a]atrim=start=${Math.max(0, l.start - 0.05)}:end=${l.end + 0.12},asetpts=PTS-STARTPTS,afade=t=out:st=${(l.end - l.start + 0.02).toFixed(3)}:d=0.12,adelay=delays=${Math.round(at * 1000)}:all=1[vo${k}];`;
+    const at = l.beat === "end" ? bodyEnd - 0.6 + 0.45 : VO_AT[l.beat] / PACE;
+    const len = (l.end - l.start + 0.02) / PACE;
+    g += `[${voIdx}:a]atrim=start=${Math.max(0, l.start - 0.05)}:end=${l.end + 0.12},asetpts=PTS-STARTPTS,atempo=${PACE},afade=t=out:st=${len.toFixed(3)}:d=0.1,adelay=delays=${Math.round(at * 1000)}:all=1[vo${k}];`;
   });
   g += VO_LINES.map((_, k) => `[vo${k}]`).join("") + `amix=inputs=${VO_LINES.length}:normalize=0,apad,atrim=end=${total.toFixed(3)},aformat=channel_layouts=stereo[voice];`;
   let aOut = "voice";
@@ -140,7 +144,10 @@ async function renderStills(bodyEnd) {
     inputs.push("-i", MUSIC);
     // Music carries the intro, then sits low; the sidechain ducks it further whenever Arthur speaks.
     g += `[voice]asplit=2[voice1][key];`;
-    g += `[${mIdx}:a]aformat=channel_layouts=stereo,atrim=end=${total.toFixed(3)},volume='if(lt(t,${bodyStart.toFixed(2)}),0.9,0.42)':eval=frame,afade=t=out:st=${(total - 2.5).toFixed(2)}:d=2.5[bed];`;
+    // Measured: voice ~-15 dB mean, this track ~-11 dB once its percussion enters. Intro 0.6 (music leads);
+    // a 1.5s ramp down to 0.14 puts the bed ~15 dB under the voice, and the sidechain dips it further on every line.
+    const t0 = bodyStart.toFixed(2);
+    g += `[${mIdx}:a]aformat=channel_layouts=stereo,atrim=end=${total.toFixed(3)},volume='if(lt(t,${t0}),0.6,if(lt(t,${t0}+1.5),0.6-0.46*(t-${t0})/1.5,0.14))':eval=frame,afade=t=out:st=${(total - 2.5).toFixed(2)}:d=2.5[bed];`;
     g += `[bed][key]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=400[ducked];`;
     g += `[voice1][ducked]amix=inputs=2:normalize=0[mix];`;
     aOut = "mix";
