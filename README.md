@@ -71,3 +71,7 @@ Deploying to Vercel works as is (`vercel deploy`). `npm test` runs the rulebook,
 ## Stack
 
 Next.js 16, SERV Reasoning (OpenAI-compatible API), Jev by TypeSafe, viem, wagmi, Coinbase AgentKit (operator wallet), the IXS vault agent SDK, and Three.js for the liquid vaults.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
