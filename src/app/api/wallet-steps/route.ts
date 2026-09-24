@@ -13,6 +13,7 @@ import { verifyMoves, verifyPlan } from "@/lib/plan-token";
 import { AddressSchema, GuardRequestSchema, LegSchema, ProfileSchema } from "@/lib/profile-schema";
 import { MOVE_ENDS } from "@/lib/rebalance";
 import { eligibility } from "@/lib/rulebook";
+import { erc20Abi, publicClient } from "@/lib/clients";
 import { scanWallet } from "@/lib/scan";
 import { getSignals } from "@/lib/signals";
 
@@ -25,6 +26,9 @@ export type WalletStep = {
   spends?: { token: Address; spender: Address; amount: string };
   /** What the user is about to sign, in plain words (wallets can mislabel approvals). */
   explain: string;
+  /** Gas limit (hex): the pre-flight estimate + 30%. Wallets otherwise use the bare estimate, and a Morpho deposit
+   *  ran out at exactly its estimate on Robin's first real run (24 Sep). */
+  gas?: `0x${string}`;
 };
 export type WalletStepsResponse = { ok: boolean; errors: string[]; steps: WalletStep[]; simulation: StepResult[] };
 
@@ -74,22 +78,37 @@ function explain(s: Step): string {
   return s.label;
 }
 
-function toWalletSteps(steps: Step[]): WalletStep[] {
-  return steps.map((s) => ({
+const withHeadroom = (gas?: string): `0x${string}` | undefined => (gas ? `0x${((BigInt(gas) * 13n) / 10n + 20_000n).toString(16)}` : undefined);
+
+function toWalletSteps(steps: Step[], sim: StepResult[]): WalletStep[] {
+  return steps.map((s, i) => ({
     explain: explain(s),
+    gas: withHeadroom(sim[i]?.gas),
     venue: s.venue, chain: s.chain, chainId: CHAINS[s.chain].chain.id, label: s.label, to: s.to,
     data: encodeFunctionData({ abi: s.abi, functionName: s.functionName, args: s.args } as never),
     spends: s.spends ? { token: s.spends.token, spender: s.spends.spender, amount: s.spends.amount.toString() } : undefined,
   }));
 }
 
-async function respond(steps: Step[], address: Address): Promise<Response> {
+/** Drops approvals the wallet already has in place (e.g. a retry after a failed deposit): one transaction fewer. */
+async function skipSatisfiedApprovals(steps: Step[], owner: Address): Promise<Step[]> {
+  const keep = await Promise.all(steps.map(async (s) => {
+    if (s.functionName !== "approve") return true;
+    const [spender, amount] = s.args as [Address, bigint];
+    const have = await publicClient(s.chain).readContract({ address: s.to, abi: erc20Abi, functionName: "allowance", args: [owner, spender] }).catch(() => 0n);
+    return have < amount;
+  }));
+  return steps.filter((_, i) => keep[i]);
+}
+
+async function respond(allSteps: Step[], address: Address): Promise<Response> {
+  const steps = await skipSatisfiedApprovals(allSteps, address);
   const simulation = await simulate(steps, address, undefined, { injectBalances: false });
   const failed = simulation.filter((r) => !r.ok);
   const body: WalletStepsResponse = {
     ok: failed.length === 0,
     errors: failed.map((r) => `${r.label}: ${r.detail}`),
-    steps: failed.length ? [] : toWalletSteps(steps),
+    steps: failed.length ? [] : toWalletSteps(steps, simulation),
     simulation,
   };
   return Response.json(body);

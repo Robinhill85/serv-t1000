@@ -37,13 +37,15 @@ function friendly(e: unknown): string {
 }
 
 /**
- * The plainest request every EIP-1193 wallet accepts: from, to, data. The wallet estimates gas and fees itself.
+ * The plainest request every EIP-1193 wallet accepts: from, to, data (+ a gas limit with headroom). The wallet sets fees.
  * (wagmi's sendTransaction first calls eth_estimateGas with extra fields some wallets reject: "Invalid parameters".)
  */
 async function sendPlain(config: Config, owner: Address, s: WalletStep): Promise<`0x${string}`> {
   const provider = (await getAccount(config).connector?.getProvider()) as Eip1193 | undefined;
   if (!provider) throw new Error("Your wallet disconnected. Connect it again and retry.");
-  return (await provider.request({ method: "eth_sendTransaction", params: [{ from: owner, to: s.to, data: s.data, value: "0x0" }] })) as `0x${string}`;
+  const tx: Record<string, string> = { from: owner, to: s.to, data: s.data, value: "0x0" };
+  if (s.gas) tx.gas = s.gas; // our pre-flight estimate + 30%: a bare estimate can run out (Morpho deposit, 24 Sep)
+  return (await provider.request({ method: "eth_sendTransaction", params: [tx] })) as `0x${string}`;
 }
 
 /**

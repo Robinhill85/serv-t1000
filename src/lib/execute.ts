@@ -32,7 +32,8 @@ export type Step = {
   holds?: { token: Address; amount: bigint };
 };
 
-export type StepResult = { venue: VenueId; chain: ChainKey; label: string; ok: boolean; detail: string; hash?: Hex; explorer?: string };
+/** gas: the simulation's estimate (decimal string), used for wallet runs' gas limits. */
+export type StepResult = { venue: VenueId; chain: ChainKey; label: string; ok: boolean; detail: string; hash?: Hex; explorer?: string; gas?: string };
 
 const vaultDepositAbi = parseAbi(["function deposit(uint256 assets, address receiver) returns (uint256 shares)"]);
 const vaultWithdrawAbi = parseAbi(["function withdraw(uint256 assets, address receiver, address owner) returns (uint256 shares)"]);
@@ -277,7 +278,7 @@ export async function simulate(steps: Step[], agent: Address, onStep?: (r: StepR
       await c.call({ account: agent, to: s.to, data, stateOverride });
       const gas = await c.estimateGas({ account: agent, to: s.to, data, stateOverride }).catch(() => null);
       const note = injected ? " (position injected for simulation)" : balanceInjected ? " (balance injected for simulation)" : "";
-      push({ venue: s.venue, chain: s.chain, label: s.label, ok: true, detail: (gas ? `Simulated OK, ~${gas} gas` : "Simulated OK") + note });
+      push({ venue: s.venue, chain: s.chain, label: s.label, ok: true, detail: (gas ? `Simulated OK, ~${gas} gas` : "Simulated OK") + note, gas: gas?.toString() });
     } catch (e) {
       const msg = e instanceof Error ? (e as { shortMessage?: string }).shortMessage ?? e.message : String(e);
       push({ venue: s.venue, chain: s.chain, label: s.label, ok: false, detail: msg.slice(0, 240) });
