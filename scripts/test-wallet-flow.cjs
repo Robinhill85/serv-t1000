@@ -2,11 +2,14 @@
 // The mock records every wallet request and returns fake tx hashes; RPC lookups for those hashes (receipts) and for
 // allowances are answered in the test, everything else goes to the real chains (plans and pre-flight are real).
 // Usage: PLAYWRIGHT=<pkg> CHROME=<Chrome for Testing> BASE=http://localhost:3200 node scripts/test-wallet-flow.cjs
+//   REJECT_AT=2  the wallet declines its 2nd transaction; the test then clicks "Finish the remaining steps" and checks
+//                that no confirmed transaction is sent twice.
+//   FLOW=withdraw USER_WALLET=<a wallet holding a T1000 position>: scan it, withdraw from the positions card.
 const { chromium } = require(process.env.PLAYWRIGHT || "playwright");
 const BASE = process.env.BASE || "http://localhost:3200";
 const USER = process.env.USER_WALLET || "0x2C12CF9dcb6C4958216e7eCe4c71a2Ebc3db358a"; // a funded wallet, read-only here
 
-const MOCK = (user) => {
+const MOCK = ({ user, rejectAt }) => {
   const listeners = {};
   const calls = [];
   let chainId = "0x2105"; // Base
@@ -28,7 +31,11 @@ const MOCK = (user) => {
           chainId = id; emit("chainChanged", id); return null;
         }
         case "wallet_addEthereumChain": { const id = params[0].chainId.toLowerCase(); known.add(id); chainId = id; emit("chainChanged", id); return null; }
-        case "eth_sendTransaction": { n += 1; return "0x" + "ab".repeat(30) + n.toString(16).padStart(4, "0"); }
+        case "eth_sendTransaction": {
+          n += 1;
+          if (n === rejectAt) throw Object.assign(new Error("User rejected the request."), { code: 4001 });
+          return "0x" + "ab".repeat(30) + n.toString(16).padStart(4, "0");
+        }
         case "eth_getTransactionReceipt": return { status: "0x1", transactionHash: params[0] }; // the wallet's own RPC
         case "wallet_getPermissions": case "wallet_requestPermissions": return [{ parentCapability: "eth_accounts" }];
         default: throw Object.assign(new Error(`mock: ${method} unsupported`), { code: 4200 });
@@ -49,7 +56,8 @@ const MOCK = (user) => {
 (async () => {
   const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME, args: ["--headless=new"] });
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-  await ctx.addInitScript(MOCK, USER);
+  const rejectAt = Number(process.env.REJECT_AT || 0);
+  await ctx.addInitScript(MOCK, { user: USER, rejectAt });
   // Fake receipts for the fake hashes, and a max allowance so the approval wait doesn't stall; the rest is real.
   // RECEIPT_VIA_WALLET=1: public RPCs fail receipt lookups (like Base publicnode on 24 Sep); only the wallet answers.
   const viaWallet = process.env.RECEIPT_VIA_WALLET === "1";
@@ -81,6 +89,22 @@ const MOCK = (user) => {
   await page.getByRole("button", { name: "Scan my wallet" }).click();
   await page.getByText("Your wallet holds").first().waitFor({ timeout: 60000 });
   log("scan:", (await page.getByText("Your wallet holds").first().innerText()).slice(0, 220));
+  const sends = () => page.evaluate(() => window.__walletCalls.filter((c) => c.method === "eth_sendTransaction").map((c) => `${c.params[0].to}:${c.params[0].data.slice(0, 74)}`));
+
+  if (process.env.FLOW === "withdraw") {
+    await page.getByText(/Your T1000 positions/).first().waitFor({ timeout: 60000 });
+    log("positions:", await page.$$eval(".msg-plan .plan-row", (els) => els.map((e) => e.innerText.replace(/\n/g, " "))));
+    const btn = page.locator(".withdraw .chips button").first();
+    log("withdraw via:", await btn.innerText());
+    await btn.click();
+    await page.getByText(/Withdraw · your wallet · live · (all confirmed|stopped)/).first().waitFor({ timeout: 120000 });
+    log("withdraw:", await page.$$eval(".exec-step", (els) => els.map((e) => e.innerText.replace(/\n/g, " ").slice(0, 110))));
+    log("sent:", JSON.stringify(await sends()));
+    await page.getByText(/Withdrawn · your wallet/).first().waitFor({ timeout: 30000 }).then(async () => log("summary:", await page.getByText(/Withdrawn · your wallet/).first().locator("..").innerText())).catch(() => log("no withdraw summary"));
+    await page.screenshot({ path: process.env.SHOT || "/tmp/wallet-flow.png" });
+    await browser.close();
+    return;
+  }
   for (const label of ["UK", /All of it/, "3–12 months", "No, it can wait", "A mix", "Medium", "Skip"]) {
     await page.locator(".chips button", { hasText: label }).first().click();
     await page.waitForTimeout(400);
@@ -96,6 +120,18 @@ const MOCK = (user) => {
   await page.locator(".risk input").check();
   await page.getByRole("button", { name: "Deploy from my wallet" }).click();
   await page.getByText(/all confirmed|stopped/).first().waitFor({ timeout: 180000 });
+  if (rejectAt) {
+    log("stopped:", await page.$$eval(".exec-step", (els) => els.map((e) => e.innerText.replace(/\n/g, " ").slice(0, 90))));
+    const before = await sends();
+    log("sent before resume:", before.length, "(incl. the declined one)");
+    await page.locator(".msg-plan .exec-actions button", { hasText: "Finish the remaining steps" }).last().click();
+    await page.getByText(/Deploy · your wallet · live · all confirmed/).first().waitFor({ timeout: 180000 });
+    const all = await sends();
+    const accepted = all.filter((_, i) => i + 1 !== rejectAt);
+    const dupes = accepted.filter((x, i) => accepted.indexOf(x) !== i);
+    log("sent after resume:", all.length, dupes.length ? `DUPLICATES: ${dupes.join(", ")}` : "no transaction sent twice");
+    if (dupes.length) throw new Error("a confirmed transaction was sent twice");
+  }
   const calls = await page.evaluate(() => window.__walletCalls.filter((c) => !["eth_chainId", "eth_accounts", "net_version"].includes(c.method)).map((c) => ({ m: c.method, chain: c.chainId, arg: c.method === "eth_sendTransaction" ? `${c.params[0].to}:${c.params[0].data.slice(0, 10)}` : c.params?.[0]?.chainId })));
   log("wallet calls:", JSON.stringify(calls));
   log("deploy:", await page.$$eval(".exec-step", (els) => els.slice(-4).map((e) => e.innerText.replace(/\n/g, " ").slice(0, 90))));

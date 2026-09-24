@@ -4,7 +4,7 @@ import { GAS_MIN, GAS_SYMBOL, VENUES, type VenueId } from "@/lib/config";
 import { whenIntroDone } from "@/components/Intro";
 import type { Position, Profile } from "@/lib/types";
 import { DRIFT_PP } from "@/lib/rulebook";
-import { GUARD_STORE_KEY, type Execution, type GuardSource, type GuardSession, type RunState, type ScanResult } from "@/lib/use-t1000";
+import { GUARD_STORE_KEY, type Execution, type ExitView, type GuardSource, type GuardSession, type RunState, type ScanResult, type WalletTarget } from "@/lib/use-t1000";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { WalletGuide } from "@/components/WalletGuide";
 import { setSoundEnabled, soundStore } from "@/lib/soundtrack";
@@ -47,6 +47,14 @@ export type GuardActions = {
   applyMoves: () => void;
   dismiss: () => void;
   resume: (address?: string) => void;
+};
+
+/** "My wallet" actions: withdraw positions, finish a stopped run, read a returning visitor's positions. */
+export type WalletActions = {
+  withdraw: (venues: VenueId[]) => void;
+  resume: (target: WalletTarget) => void;
+  positions: (address: string) => Promise<Position[] | null>;
+  finishExit: () => void;
 };
 
 /**
@@ -120,7 +128,47 @@ function gasGaps(r: ScanResult): string[] {
 
 const RISK_TEXT = "Real funds from my wallet. This is a hackathon beta and not financial advice. IXS is a regulated RWA vault: deposits settle T+1, exits cost 0.5%, and IXS can reject a request (the USDC comes back). ETH is volatile. I confirm every transaction in my wallet.";
 
-function ExecutionView({ ex, title }: { ex: Execution; title: string }) {
+const WITHDRAW_LABEL: Record<VenueId, string> = { base: "Withdraw Base lending", rh_eth: "Sell ETH for USDG", ixs: "Request IXS exit", rh_stocks: "" };
+/** Withdrawable now: Base shares and WETH any time; IXS only once its shares have settled. */
+const canExit = (p: Position) => p.usd > 0 && (p.venue === "base" || p.venue === "rh_eth" || (p.venue === "ixs" && p.status === "SETTLED"));
+
+/** Per-position Withdraw buttons plus "Withdraw everything", for positions held by the user's own wallet. */
+function WithdrawControls({ positions, owner, connected, busy, onWithdraw }: {
+  positions: Position[]; owner: string; connected?: string; busy: boolean; onWithdraw: (venues: VenueId[]) => void;
+}) {
+  if (!positions.some((p) => p.usd > 0)) return null;
+  const ready = positions.filter(canExit);
+  const mismatch = !connected || connected.toLowerCase() !== owner.toLowerCase();
+  return (
+    <div className="withdraw">
+      {mismatch && <div className="plan-adjust wallet-block">Connect {short(owner)} in your wallet to withdraw these.</div>}
+      <div className="chips">
+        {ready.map((p) => (
+          <button key={p.venue} disabled={busy || mismatch} onClick={() => onWithdraw([p.venue])}>{WITHDRAW_LABEL[p.venue]} · {usd(p.usd)}</button>
+        ))}
+        {ready.length > 1 && <button disabled={busy || mismatch} onClick={() => onWithdraw(ready.map((p) => p.venue))}>Withdraw everything</button>}
+      </div>
+      {positions.some((p) => p.venue === "ixs" && p.status === "PENDING_T1") && (
+        <div className="plan-cite">The IXS deposit is still settling (T+1). It can exit once its shares arrive.</div>
+      )}
+      {ready.length > 0 && <div className="plan-cite">You confirm each step in your wallet. Base is instant; IXS exits settle T+1 with a 0.5% fee; ETH sells for USDG with a 1% slippage floor.</div>}
+    </div>
+  );
+}
+
+/** What a finished withdrawal did, per venue, in plain words. */
+function exitSummary(x: ExitView): string {
+  const confirmed = new Set(x.execution.steps.filter((st) => st.ok).map((st) => st.venue));
+  const lines = x.venues.filter((v) => confirmed.has(v)).map((v) => ({
+    base: "Base lending: your USDC plus interest is back in your wallet.",
+    rh_eth: "ETH sold for USDG, in your wallet on Robinhood Chain.",
+    ixs: "IXS exit requested: the USDC arrives after settlement (T+1, 0.5% fee).",
+    rh_stocks: "",
+  })[v]);
+  return [...lines, ...(x.execution.notes ?? [])].join(" ") || "Nothing needed withdrawing.";
+}
+
+function ExecutionView({ ex, title, onResume }: { ex: Execution; title: string; onResume?: () => void }) {
   return (
     <div className="msg msg-agent msg-plan">
       <div className="msg-kicker">
@@ -139,7 +187,14 @@ function ExecutionView({ ex, title }: { ex: Execution; title: string }) {
           </div>
         </div>
       ))}
+      {ex.notes?.map((n) => <div key={n} className="plan-cite">{n}</div>)}
       {ex.error && <div className="plan-adjust">{ex.error}</div>}
+      {onResume && ex.status === "failed" && ex.resume && (
+        <div className="exec-actions">
+          <button className="btn-approve" onClick={onResume}>{ex.resume.done.length || ex.resume.sent.length ? "Finish the remaining steps" : "Try again"}</button>
+          <div className="plan-cite">Confirmed steps are skipped, and anything sent earlier is checked first, so nothing is sent twice.</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -152,7 +207,7 @@ const DEMOS: Record<string, Profile> = {
 };
 const usd = (n: number) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet, guard: G }: {
+export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet, guard: G, wallet: W }: {
   state: RunState;
   onScan: (address: string, walletMode?: boolean) => Promise<ScanResult | null>;
   onRun: (p: Profile) => void;
@@ -160,6 +215,7 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
   onExecute: (mode: "simulate" | "live", plan: RunState["plan"], profile: Profile | null, passcode?: string) => void;
   onExecuteWallet: (mode: "simulate" | "live", plan: RunState["plan"], profile: Profile | null) => void;
   guard: GuardActions;
+  wallet: WalletActions;
 }) {
   const { address: connected, isConnected } = useAccount();
   const { connectors, connect, isPending: connecting, error: connectError } = useConnect();
@@ -247,6 +303,22 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [moves, movePlan]);
 
+  // A finished withdrawal is written into the log, then the positions are re-read.
+  const exitHandedOff = useRef<Execution | null>(null);
+  const exitEx = state.exit?.execution ?? null;
+  useEffect(() => {
+    const x = state.exit;
+    if (!x || x.execution.status !== "done" || exitHandedOff.current === x.execution) return;
+    const id = setTimeout(() => {
+      exitHandedOff.current = x.execution;
+      flushTail();
+      say({ from: "agent", kicker: "Withdrawn · your wallet · live", text: exitSummary(x) });
+      W.finishExit();
+    }, HANDOFF_MS);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exitEx]);
+
   // ?demo=<profile> auto-plays a scripted run (testing and demo recording). The goal line is part of the script.
   const autoRan = useRef(false);
   useEffect(() => {
@@ -289,13 +361,16 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
   async function scanMine() {
     if (!connected) return;
     say({ from: "user", text: `Scan my wallet ${short(connected)}` });
-    const r = await onScan(connected, true);
+    const [r, held] = await Promise.all([onScan(connected, true), W.positions(connected)]);
     if (!r) { say({ from: "agent", text: "I couldn't read your wallet. Try again in a moment." }); return; }
     if (!r.walletEnabled) { say({ from: "agent", text: "Wallet mode is switched off right now. The demo still works." }); return; }
     say({ from: "agent", text: describeWallet(r) });
+    const open = (held ?? []).filter((p) => p.usd > 0);
+    if (open.length) say({ from: "agent", text: `You already have T1000 positions: ${open.map((p) => `${VENUES[p.venue].name} ${usd(p.usd)}`).join(" · ")}. Withdraw them with the buttons below, or deploy more.` });
     const gaps = gasGaps(r);
     if (gaps.length) say({ from: "agent", text: `Heads-up: no gas on ${gaps.join(", ")}. I can plan it, but you can't send there until you add some. Around $0.10 is plenty.` });
     // The smallest venue minimum is Base lending at $1; each chain also needs a little gas (checked in the plan).
+    if (r.idleStablesUsd < 1 && open.length) { say({ from: "agent", text: "Nothing idle to deploy right now. Your positions are below." }); return; }
     if (r.idleStablesUsd < 1) {
       say({ from: "agent", text: "There's under $1 in stablecoins here. Add USDC on Base (a dollar or two works, plus a little ETH for gas), USDC on Avalanche ($100+ for the IXS vault) or USDG on Robinhood Chain. Or try the demo." });
       return;
@@ -305,6 +380,7 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
   }
 
   const [busy, setBusy] = useState(false);
+  const guardWallet = !!state.guard && state.guard.session.source === "live" && !!state.guard.session.address;
 
   // ---------- Ask T1000 (free-form questions, answered by SERV; talk only) ----------
   const [asking, setAsking] = useState(false);
@@ -328,6 +404,8 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
       plan: state.plan ? { legs: state.plan.legs, blocked: state.plan.blocked, adjustments: state.plan.adjustments, excluded: (state.verified?.result.decision ?? state.fast?.result.decision)?.blocked ?? [] } : null,
       last_run: state.execution ? { mode: state.execution.mode, by: state.execution.by ?? "agent", status: state.execution.status, failed } : null,
       guard: g ? { source: g.source, positions: g.positions.map((x) => ({ venue: x.venue, usd: x.usd, status: x.status })), triggers: g.triggers } : null,
+      my_positions: state.positions ? state.positions.list.filter((p) => p.usd > 0).map((p) => ({ venue: p.venue, usd: p.usd, status: p.status })) : null,
+      withdraw_available_in: guardWallet ? "the Guard card" : state.positions ? "the positions card" : "after connecting and scanning the wallet",
     };
   }
 
@@ -348,14 +426,28 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
     if (current) say({ from: "agent", text: current.ask }); // back to the step the visitor was on
   }
 
+  /** Reads the connected wallet's positions; the positions card (with Withdraw buttons) renders from them. */
+  async function showPositions() {
+    if (guardWallet) { say({ from: "agent", text: "Use the Withdraw buttons on the Guard card." }); return; }
+    if (!connected) { say({ from: "agent", text: "Connect the wallet you deployed from (the wallet buttons below), then tap Show my positions again." }); return; }
+    say({ from: "user", text: "Show my positions" });
+    const list = await W.positions(connected);
+    const open = (list ?? []).filter((p) => p.usd > 0);
+    if (!list) say({ from: "agent", text: "I couldn't read your positions just now. Try again in a moment." });
+    else if (!open.length) say({ from: "agent", text: `${short(connected)} holds no T1000 positions right now.` });
+    else say({ from: "agent", text: `Your positions: ${open.map((p) => `${VENUES[p.venue].name} ${usd(p.usd)}`).join(" · ")}. Withdraw below; you confirm each step in your wallet.` });
+  }
+
   function runSuggestion(sg: AskSuggestion) {
-    if (sg === "guide") setGuideOpen(true);
+    if (sg === "withdraw") void showPositions();
+    else if (sg === "guide") setGuideOpen(true);
     else if (sg === "restart") onReset();
     else if (sg === "demo") { setAddress(DEMO_WALLET); void scanWith(DEMO_WALLET); }
     else if (sg === "scan") { if (connected) void scanMine(); else setGuideOpen(true); }
   }
   const SUGGEST_LABEL: Record<Exclude<AskSuggestion, "none">, string> = {
     scan: connected ? "Scan my wallet" : "How to connect a wallet", demo: "Try the demo", guide: "Open the wallet guide", restart: "Restart",
+    withdraw: guardWallet ? "Withdraw (Guard card)" : "Show my positions",
   };
 
   /** Records one answer. `shown` is the user's bubble; `echo` is the agent's read-back when it interpreted free text. */
@@ -426,6 +518,9 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
     const total = (base >= 1 ? base : 0) + (avax >= VENUES.ixs.minUsd ? avax : 0);
     return Math.floor(Math.min(total, state.walletMaxRunUsd ?? Infinity) * 100) / 100;
   })();
+  // A live wallet run that stopped after sending something: it can only be finished, never started over (no double deposits).
+  const partialRun = state.execution?.by === "wallet" && state.execution.mode === "live" && !!state.execution.resume
+    && (state.execution.resume.done.length > 0 || state.execution.resume.sent.length > 0);
   const fastDecision = state.fast?.result.decision;
   const verifiedDecision = state.verified?.result.decision;
   const reasons = useMemo(() => (verifiedDecision ?? fastDecision)?.reasons ?? [], [verifiedDecision, fastDecision]);
@@ -498,9 +593,15 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
                       <input type="checkbox" checked={riskOk} onChange={(e) => setRiskOk(e.target.checked)} />
                       <span>{RISK_TEXT}</span>
                     </label>
-                    <button className="btn-approve" disabled={!riskOk || !isConnected || state.execution?.status === "running"} onClick={() => onExecuteWallet("live", state.plan, state.profile)}>
-                      {state.execution?.status === "running" && state.execution.mode === "live" ? "Confirm each step in your wallet…" : "Deploy from my wallet"}
-                    </button>
+                    {partialRun ? (
+                      <button className="btn-approve" disabled={!isConnected || state.execution?.status === "running"} onClick={() => W.resume("run")}>
+                        {state.execution?.status === "running" ? "Confirm each step in your wallet…" : "Finish the remaining steps"}
+                      </button>
+                    ) : (
+                      <button className="btn-approve" disabled={!riskOk || !isConnected || state.execution?.status === "running"} onClick={() => onExecuteWallet("live", state.plan, state.profile)}>
+                        {state.execution?.status === "running" && state.execution.mode === "live" ? "Confirm each step in your wallet…" : "Deploy from my wallet"}
+                      </button>
+                    )}
                     <button className="btn-live-link" disabled={state.execution?.status === "running"} onClick={() => onExecuteWallet("simulate", state.plan, state.profile)}>
                       Check it first: simulate from my wallet (nothing is sent)
                     </button>
@@ -527,16 +628,35 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
           </div>
         )}
 
-        {state.execution && <ExecutionView ex={state.execution} title={feeding != null ? "Feed" : "Deploy"} />}
+        {state.execution && <ExecutionView ex={state.execution} title={feeding != null ? "Feed" : "Deploy"} onResume={() => W.resume("run")} />}
 
-        {state.guard && feeding == null && <GuardCard state={state} G={G} />}
+        {state.positions && !state.guard && state.positions.list.some((p) => p.usd > 0) && (
+          <div className="msg msg-agent msg-plan">
+            <div className="msg-kicker">Your T1000 positions · onchain · {short(state.positions.address)}</div>
+            {state.positions.list.filter((p) => p.usd > 0).map((p) => (
+              <div key={p.venue} className="plan-leg">
+                <div className="plan-row"><strong>{VENUES[p.venue].name}</strong><span>{usd(p.usd)}</span></div>
+                <div className="plan-cite">{p.detail}</div>
+              </div>
+            ))}
+            <WithdrawControls positions={state.positions.list} owner={state.positions.address} connected={connected} busy={!!state.exit || state.execution?.status === "running"} onWithdraw={W.withdraw} />
+          </div>
+        )}
+
+        {state.guard && feeding == null && <GuardCard state={state} G={G} W={W} connected={connected} />}
 
         {state.guard?.rebalance && feeding == null && (
           <RebalanceCard
             state={state} G={G} liveOpen={movesLiveOpen} setLiveOpen={setMovesLiveOpen} passcode={movesPasscode} setPasscode={setMovesPasscode}
           />
         )}
-        {state.guard?.moves && feeding == null && <ExecutionView ex={state.guard.moves} title="Moves" />}
+        {state.guard?.moves && feeding == null && <ExecutionView ex={state.guard.moves} title="Moves" onResume={() => W.resume("moves")} />}
+        {state.exit && (
+          <>
+            <ExecutionView ex={state.exit.execution} title="Withdraw" onResume={() => W.resume("exit")} />
+            {state.exit.execution.status === "failed" && <button className="btn-live-link" onClick={W.finishExit}>Close</button>}
+          </>
+        )}
 
         {state.phase === "error" && <div className="msg msg-agent msg-error">{state.error}</div>}
         {tail.map((m, i) => (
@@ -619,7 +739,7 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
   );
 }
 
-function GuardCard({ state, G }: { state: RunState; G: GuardActions }) {
+function GuardCard({ state, G, W, connected }: { state: RunState; G: GuardActions; W: WalletActions; connected?: string }) {
   const g = state.guard!;
   const { data, session } = g;
   const total = data?.positions.reduce((a, p) => a + p.usd, 0) ?? 0;
@@ -628,7 +748,8 @@ function GuardCard({ state, G }: { state: RunState; G: GuardActions }) {
   const actionable = triggers.filter((t) => t.code !== "NEW_CASH");
   const fresh = data ? Math.floor((data.idleUsd - data.idleAtDeployUsd) * 100) / 100 : 0;
   const feedUsd = Math.min(fresh, state.maxRunUsd ?? fresh);
-  const busy = !!g.rebalance || !!g.moves;
+  const busy = !!g.rebalance || !!g.moves || !!state.exit;
+  const ownWallet = session.source === "live" && session.address ? session.address : null;
   const stress = data && !session.scenario ? stressMult(data.positions, target("rh_eth")) : null;
   return (
     <div className="msg msg-agent msg-plan">
@@ -666,6 +787,7 @@ function GuardCard({ state, G }: { state: RunState; G: GuardActions }) {
         <div className="plan-cite guard-clear-note">All clear: every position is within 5pp of its target.</div>
       ))}
       {g.error && <div className="plan-adjust">{g.error}</div>}
+      {ownWallet && data && <WithdrawControls positions={data.positions} owner={ownWallet} connected={connected} busy={busy || g.scanning} onWithdraw={W.withdraw} />}
       <div className="exec-actions">
         {fresh >= 20 && feedUsd > 0 && !busy && (
           <button className="btn-approve" onClick={() => G.feed(feedUsd)}>Feed {usd(feedUsd)} of new cash into the plan</button>

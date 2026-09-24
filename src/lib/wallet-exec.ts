@@ -1,13 +1,14 @@
 "use client";
 // Runs /api/wallet-steps transactions through the user's own wallet, one at a time, in order: switch to the step's
 // chain (wagmi adds Robinhood Chain if the wallet doesn't know it), wait until any approval the step relies on is
-// visible, send it for the user to confirm, then wait for the receipt. Stops at the first rejection or revert.
+// visible, re-check it on the server (fresh build + simulation from the wallet), send it for the user to confirm,
+// then wait for the receipt. Stops at the first rejection, revert or failed re-check.
 import { parseAbi, type Address } from "viem";
 import type { Config } from "wagmi";
 import { getAccount, readContract, switchChain, waitForTransactionReceipt } from "wagmi/actions";
 import { CHAINS } from "./config";
 import type { StepView } from "./use-t1000";
-import type { WalletStep } from "@/app/api/wallet-steps/route";
+import type { WalletStep, WalletStepPrepare } from "@/app/api/wallet-steps/route";
 
 const allowanceAbi = parseAbi(["function allowance(address owner, address spender) view returns (uint256)"]);
 
@@ -52,7 +53,7 @@ async function sendPlain(config: Config, owner: Address, s: WalletStep): Promise
  * Receipt for a sent transaction: the public RPC first, then the user's own wallet provider (already on the right
  * chain). Null when neither can confirm it within the time limit.
  */
-async function confirm(config: Config, hash: `0x${string}`, chainId: number, limitMs = 120_000): Promise<{ status: "success" | "reverted" } | null> {
+export async function confirm(config: Config, hash: `0x${string}`, chainId: number, limitMs = 120_000): Promise<{ status: "success" | "reverted" } | null> {
   // Both at once, first answer wins: the public RPC can refuse receipt lookups (Base publicnode: "Archive requests
   // require a personal token"), and the wallet's own RPC may lag. Null if neither confirms within the limit.
   let done = false;
@@ -75,10 +76,20 @@ async function confirm(config: Config, hash: `0x${string}`, chainId: number, lim
   return out;
 }
 
+export type RunHooks = {
+  /** Rebuilds and re-simulates a step on the server right before it is signed (fresh quote, last check). */
+  prepare?: (key: string) => Promise<WalletStepPrepare>;
+  /** A transaction was handed to the chain (kept so a retry can look it up instead of sending it again). */
+  sent?: (s: WalletStep, hash: `0x${string}`) => void;
+  /** A step is confirmed onchain (or an approval was already in place). */
+  confirmed?: (key: string) => void;
+};
+
 /** Emits a full StepView per update: pending (awaiting signature / confirming), then confirmed or failed. */
-export async function runWalletSteps(config: Config, steps: WalletStep[], owner: Address, onStep: (index: number, v: StepView) => void): Promise<boolean> {
-  for (const [i, s] of steps.entries()) {
-    const base: StepView = { venue: s.venue, chain: s.chain, label: s.label };
+export async function runWalletSteps(config: Config, steps: WalletStep[], owner: Address, onStep: (index: number, v: StepView) => void, hooks: RunHooks = {}): Promise<boolean> {
+  for (const [i, planned] of steps.entries()) {
+    let s = planned;
+    let base: StepView = { key: s.key, venue: s.venue, chain: s.chain, label: s.label };
     try {
       if (getAccount(config).chainId !== s.chainId) {
         onStep(i, { ...base, detail: `Switch your wallet to ${CHAINS[s.chain].chain.name}…` });
@@ -88,6 +99,22 @@ export async function runWalletSteps(config: Config, steps: WalletStep[], owner:
         onStep(i, { ...base, detail: "Waiting for the approval to land…" });
         await waitForAllowance(config, s, owner);
       }
+      // The first step was checked a moment ago with the whole run; later ones may be minutes later.
+      if (i > 0 && hooks.prepare) {
+        onStep(i, { ...base, detail: "Re-checking this step from your wallet…" });
+        const r = await hooks.prepare(s.key).catch(() => ({ ok: false, error: "I couldn't re-check this step just now. Nothing was sent for it; try again." }) as WalletStepPrepare);
+        if (r.skip) {
+          onStep(i, { ...base, ok: true, detail: "Already in place, nothing to sign" });
+          hooks.confirmed?.(s.key);
+          continue;
+        }
+        if (!r.ok || !r.step) {
+          onStep(i, { ...base, ok: false, detail: r.error ?? "This step didn't pass its last check. Nothing was sent for it." });
+          return false;
+        }
+        s = r.step;
+        base = { ...base, label: s.label };
+      }
       onStep(i, { ...base, detail: `Confirm in your wallet. ${s.explain}` });
       let hash: `0x${string}`;
       try {
@@ -96,13 +123,15 @@ export async function runWalletSteps(config: Config, steps: WalletStep[], owner:
         throw Object.assign(new Error("wallet"), { walletError: e });
       }
       const explorer = `${CHAINS[s.chain].explorer}/tx/${hash}`;
+      hooks.sent?.(s, hash);
       onStep(i, { ...base, detail: "Sent, confirming…", hash, explorer });
       const receipt = await confirm(config, hash, s.chainId);
       if (!receipt) {
-        onStep(i, { ...base, ok: false, hash, explorer, detail: "Sent, but I couldn't confirm it yet. Check the tx link; nothing after it was sent. Restart to continue once it shows Success." });
+        onStep(i, { ...base, ok: false, hash, explorer, detail: "Sent, but I couldn't confirm it yet. Check the tx link; nothing after it was sent. \"Finish the remaining steps\" checks it first, so it is never sent twice." });
         return false;
       }
       const ok = receipt.status === "success";
+      if (ok) hooks.confirmed?.(s.key);
       onStep(i, { ...base, ok, hash, explorer, detail: ok ? "Confirmed" : "Reverted onchain. Nothing after it was sent." });
       if (!ok) return false;
     } catch (e) {

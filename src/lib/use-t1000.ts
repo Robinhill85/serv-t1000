@@ -14,13 +14,25 @@ import type { Signals } from "./signals";
 import { blendTargets, rebase } from "./guard-math";
 import type { Eligibility, Leg, Position, Profile, Split } from "./types";
 import type { Address } from "viem";
-import type { WalletStepsResponse } from "@/app/api/wallet-steps/route";
+import type { WalletStepPrepare, WalletStepsResponse } from "@/app/api/wallet-steps/route";
 import { wagmiConfig } from "@/components/WalletProvider";
-import { runWalletSteps } from "./wallet-exec";
+import { confirm, runWalletSteps } from "./wallet-exec";
 
-export type StepView = { venue: string; chain: string; label: string; ok?: boolean; detail?: string; hash?: string; explorer?: string };
+export type StepView = { key?: string; venue: string; chain: string; label: string; ok?: boolean; detail?: string; hash?: string; explorer?: string };
+/** What a stopped wallet run needs to finish: its request, the steps confirmed onchain, and every transaction sent. */
+export type WalletRequest = { kind: "plan" | "moves" | "withdraw"; address: string; [k: string]: unknown };
+export type WalletResume = { request: WalletRequest; done: string[]; sent: { key: string; label: string; hash: string; chainId: number }[] };
 /** by: "wallet" = signed in the user's own wallet ("My wallet" mode); otherwise the server/agent path. */
-export type Execution = { mode: "simulate" | "live"; status: "running" | "done" | "failed"; checks: string[]; steps: StepView[]; error?: string; by?: "agent" | "wallet" };
+export type Execution = {
+  mode: "simulate" | "live"; status: "running" | "done" | "failed"; checks: string[]; steps: StepView[]; error?: string; by?: "agent" | "wallet";
+  /** Wallet runs that stopped part-way: "Finish the remaining steps" continues from here. */
+  resume?: WalletResume;
+  /** Server notes, e.g. a position that can't be withdrawn yet. */
+  notes?: string[];
+};
+/** A withdrawal from the user's own wallet positions (Guard or a returning visitor's scan). */
+export type ExitView = { venues: VenueId[]; moves: Move[]; from: Position[]; address: string; execution: Execution };
+export type WalletTarget = "run" | "moves" | "exit";
 
 export type ScanResult = { holdings: Holding[]; idleStablesUsd: number; maxRunUsd: number; walletMaxRunUsd: number; walletEnabled: boolean };
 
@@ -82,12 +94,15 @@ export type RunState = {
   /** "My wallet" mode: the connected wallet this run plans for and signs with; null = demo. */
   wallet: string | null;
   walletMaxRunUsd: number | null;
+  /** The connected wallet's T1000 positions, read onchain after a scan (returning visitors can withdraw). */
+  positions: { address: string; list: Position[]; at: number } | null;
+  exit: ExitView | null;
 };
 
 const initial: RunState = {
   phase: "idle", holdings: null, idleStablesUsd: null, maxRunUsd: null, signals: null, eligibility: null, jev: null,
   fast: null, verified: null, plan: null, error: null, startedAt: null, arrived: {}, profile: null, execution: null, guard: null,
-  wallet: null, walletMaxRunUsd: null,
+  wallet: null, walletMaxRunUsd: null, positions: null, exit: null,
 };
 const clearedRun = { signals: null, eligibility: null, jev: null, fast: null, verified: null, plan: null, execution: null, error: null, arrived: {} };
 
@@ -120,6 +135,62 @@ async function readSse(res: Response, on: (e: { type: string; [k: string]: unkno
   }
 }
 
+/** Wallet-run failures go to the server log too (no personal data; the server strips addresses and hashes). */
+function logWalletFailure(where: string, v: { venue?: string; chain?: string; label?: string; detail?: string }) {
+  try {
+    void fetch("/api/client-log", {
+      method: "POST", keepalive: true, headers: { "content-type": "application/json" },
+      body: JSON.stringify({ where, venue: v.venue, chain: v.chain, label: v.label?.slice(0, 160), detail: (v.detail ?? "no detail").slice(0, 600) }),
+    }).catch(() => {});
+  } catch { /* logging never breaks a run */ }
+}
+
+async function stepsApi<T>(body: object): Promise<T> {
+  const res = await fetch("/api/wallet-steps", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  return (await res.json()) as T;
+}
+
+/**
+ * One wallet run (a plan, Guard moves or a withdrawal): pre-flight from the wallet, then every step re-checked and
+ * signed in turn. `prior` continues a stopped run: its confirmed steps stay confirmed and are never sent again.
+ */
+async function walletRun(
+  mode: "simulate" | "live", request: WalletRequest, patch: (f: (ex: Execution) => Execution) => void,
+  prior?: { resume: WalletResume; kept: StepView[] },
+): Promise<boolean> {
+  const done = [...(prior?.resume.done ?? [])];
+  const sent = [...(prior?.resume.sent ?? [])];
+  const kept = prior?.kept ?? [];
+  const snapshot = (): WalletResume => ({ request, done: [...done], sent: [...sent] });
+  const json = await stepsApi<WalletStepsResponse>({ ...request, skip: done });
+  const preflight: StepView[] = json.simulation.map((r) => ({ venue: r.venue, chain: r.chain, label: r.label, ok: r.ok, detail: r.detail }));
+  if (!json.ok) {
+    for (const e of json.errors) logWalletFailure(`${request.kind}:preflight`, { detail: e });
+    patch((ex) => ({
+      ...ex, status: "failed", checks: json.errors, steps: [...kept, ...preflight], notes: json.notes,
+      error: "Nothing was sent: the pre-flight check from your wallet did not pass.", resume: prior ? snapshot() : undefined,
+    }));
+    return false;
+  }
+  if (mode === "simulate") { patch((ex) => ({ ...ex, status: "done", steps: preflight, notes: json.notes })); return true; }
+  if (!json.steps.length) { patch((ex) => ({ ...ex, status: "done", steps: kept, notes: json.notes, resume: undefined })); return true; }
+  patch((ex) => ({ ...ex, notes: json.notes, steps: [...kept, ...json.steps.map((st) => ({ key: st.key, venue: st.venue, chain: st.chain, label: st.label, detail: "Waiting" }))] }));
+  const ok = await runWalletSteps(
+    wagmiConfig, json.steps, request.address as Address,
+    (i, v) => {
+      patch((ex) => ({ ...ex, steps: ex.steps.map((st, k) => (k === kept.length + i ? v : st)) }));
+      if (v.ok === false) logWalletFailure(request.kind, v);
+    },
+    {
+      prepare: (key) => stepsApi<WalletStepPrepare>({ ...request, skip: done, only: key }),
+      sent: (st, hash) => { sent.push({ key: st.key, label: st.label, hash, chainId: st.chainId }); },
+      confirmed: (key) => { done.push(key); },
+    },
+  );
+  patch((ex) => ({ ...ex, status: ok ? "done" : "failed", resume: ok ? undefined : snapshot() }));
+  return ok;
+}
+
 /** One /api/execute event applied to an execution view (plans and moves stream the same events). */
 function applyExec(ex: Execution, e: { type: string; [k: string]: unknown }): Execution {
   switch (e.type) {
@@ -150,6 +221,19 @@ export function useT1000() {
     const ep = epoch.current;
     return (f: (g: GuardView) => GuardView) => { if (epoch.current === ep) setGuard(f); };
   }, [setGuard]);
+
+  /** Writes into one wallet run's execution view; a no-op once Restart has begun a new session. */
+  const writerFor = useCallback((target: WalletTarget) => {
+    const ep = epoch.current;
+    return (f: (ex: Execution) => Execution) => {
+      if (epoch.current !== ep) return;
+      setState((s) => {
+        if (target === "run") return s.execution ? { ...s, execution: f(s.execution) } : s;
+        if (target === "moves") return s.guard?.moves ? { ...s, guard: { ...s.guard, moves: f(s.guard.moves) } } : s;
+        return s.exit ? { ...s, exit: { ...s.exit, execution: f(s.exit.execution) } } : s;
+      });
+    };
+  }, []);
 
   /** walletMode: the address is the user's connected wallet ("My wallet" mode); otherwise a demo scan. */
   const scanWallet = useCallback(async (address: string, walletMode = false) => {
@@ -229,32 +313,58 @@ export function useT1000() {
   const executeWithWallet = useCallback(async (mode: "simulate" | "live", plan: RunState["plan"], profile: Profile | null) => {
     const address = stateRef.current.wallet;
     if (!plan?.planToken || !profile || !address) return;
-    const ep = epoch.current;
-    const live = () => epoch.current === ep;
-    const blank: Execution = { mode, by: "wallet", status: "running", checks: [], steps: [] };
-    const patch = (f: (ex: Execution) => Execution) => { if (live()) setState((s) => ({ ...s, execution: f(s.execution ?? blank) })); };
-    setState((s) => ({ ...s, execution: blank }));
+    setState((s) => ({ ...s, execution: { mode, by: "wallet", status: "running", checks: [], steps: [] } }));
+    const patch = writerFor("run");
     try {
-      const res = await fetch("/api/wallet-steps", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ kind: "plan", address, profile, legs: plan.legs, iat: plan.iat, planToken: plan.planToken }),
-      });
-      const json = (await res.json()) as WalletStepsResponse;
-      const preflight: StepView[] = json.simulation.map((r) => ({ venue: r.venue, chain: r.chain, label: r.label, ok: r.ok, detail: r.detail }));
-      if (!json.ok) {
-        patch((ex) => ({ ...ex, status: "failed", checks: json.errors, steps: preflight, error: "Nothing was sent: the pre-flight check from your wallet did not pass." }));
-        return;
-      }
-      if (mode === "simulate") { patch((ex) => ({ ...ex, status: "done", steps: preflight })); return; }
-      patch((ex) => ({ ...ex, steps: json.steps.map((st) => ({ venue: st.venue, chain: st.chain, label: st.label, detail: "Waiting" })) }));
-      const ok = await runWalletSteps(wagmiConfig, json.steps, address as Address, (i, v) =>
-        patch((ex) => ({ ...ex, steps: ex.steps.map((st, k) => (k === i ? v : st)) })));
-      patch((ex) => ({ ...ex, status: ok ? "done" : "failed" }));
+      await walletRun(mode, { kind: "plan", address, profile, legs: plan.legs, iat: plan.iat, planToken: plan.planToken }, patch);
     } catch (e) {
       patch((ex) => ({ ...ex, status: "failed", error: e instanceof Error ? e.message : "The wallet run stopped." }));
     }
+  }, [writerFor]);
+
+  /** A returning visitor's positions, read onchain for their connected wallet. */
+  const loadPositions = useCallback(async (address: string): Promise<Position[] | null> => {
+    const ep = epoch.current;
+    try {
+      const res = await fetch(`/api/positions?address=${address}`);
+      const json = await res.json();
+      if (!res.ok) return null;
+      if (epoch.current === ep) setState((s) => ({ ...s, positions: { address, list: json.positions as Position[], at: json.at as number } }));
+      return json.positions as Position[];
+    } catch {
+      return null;
+    }
   }, []);
+
+  /**
+   * Continues a stopped wallet run. Transactions that were sent but never confirmed are looked up first: confirmed
+   * ones count as done, reverted ones are rebuilt, and one still unknown stops here so nothing is ever sent twice.
+   */
+  const resumeWallet = useCallback(async (target: WalletTarget) => {
+    const s = stateRef.current;
+    const ex = target === "run" ? s.execution : target === "moves" ? s.guard?.moves : s.exit?.execution;
+    const r = ex?.resume;
+    if (!ex || !r) return;
+    const patch = writerFor(target);
+    patch((x) => ({ ...x, status: "running", error: undefined, checks: [] }));
+    const done = [...r.done];
+    try {
+      for (const t of r.sent.filter((x) => !done.includes(x.key))) {
+        const rc = await confirm(wagmiConfig, t.hash as `0x${string}`, t.chainId, 20_000).catch(() => null);
+        if (rc?.status === "success") {
+          done.push(t.key);
+          patch((x) => ({ ...x, steps: x.steps.map((st) => (st.key === t.key ? { ...st, ok: true, detail: "Confirmed" } : st)) }));
+        } else if (!rc) {
+          patch((x) => ({ ...x, status: "failed", error: `"${t.label}" was sent but hasn't confirmed yet. Check its tx link and try again in a minute. Nothing else was sent.` }));
+          return;
+        }
+      }
+      const kept = ex.steps.filter((st) => st.key && done.includes(st.key)).map((st) => (st.ok ? st : { ...st, ok: true, detail: "Confirmed" }));
+      await walletRun("live", r.request, patch, { resume: { ...r, done }, kept });
+    } catch (e) {
+      patch((x) => ({ ...x, status: "failed", error: e instanceof Error ? e.message : "The wallet run stopped." }));
+    }
+  }, [writerFor]);
 
   // ---------- Guard mode ----------
 
@@ -389,22 +499,10 @@ export function useT1000() {
     const fail = (error: string) => write((x) => ({ ...x, moves: { ...(x.moves ?? blank), status: "failed", error } }));
     if (g.session.address && g.session.source === "live") {
       // Moves on the user's own wallet: same server checks, signed in their wallet.
-      const address = g.session.address as Address;
-      const patch = (f: (ex: Execution) => Execution) => write((x) => ({ ...x, moves: f(x.moves ?? { ...blank, by: "wallet" }) }));
-      patch(() => ({ ...blank, by: "wallet" }));
+      const address = g.session.address;
+      write((x) => ({ ...x, moves: { ...blank, by: "wallet" } }));
       try {
-        const res = await fetch("/api/wallet-steps", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ kind: "moves", address, moves: plan.check.executable, guard: guardRequest(g.session), iat: plan.iat, planToken: plan.planToken }),
-        });
-        const json = (await res.json()) as WalletStepsResponse;
-        const preflight: StepView[] = json.simulation.map((r) => ({ venue: r.venue, chain: r.chain, label: r.label, ok: r.ok, detail: r.detail }));
-        if (!json.ok) { patch((ex) => ({ ...ex, status: "failed", checks: json.errors, steps: preflight, error: "Nothing was sent: the pre-flight check from your wallet did not pass." })); return; }
-        if (mode === "simulate") { patch((ex) => ({ ...ex, status: "done", steps: preflight })); return; }
-        patch((ex) => ({ ...ex, steps: json.steps.map((st) => ({ venue: st.venue, chain: st.chain, label: st.label, detail: "Waiting" })) }));
-        const ok = await runWalletSteps(wagmiConfig, json.steps, address, (i, v) => patch((ex) => ({ ...ex, steps: ex.steps.map((st, k) => (k === i ? v : st)) })));
-        patch((ex) => ({ ...ex, status: ok ? "done" : "failed" }));
+        await walletRun(mode, { kind: "moves", address, moves: plan.check.executable, guard: guardRequest(g.session), iat: plan.iat, planToken: plan.planToken }, writerFor("moves"));
       } catch (e) {
         fail(e instanceof Error ? e.message : "The wallet run stopped.");
       }
@@ -421,7 +519,38 @@ export function useT1000() {
     } catch (e) {
       fail(e instanceof Error ? e.message : "Execution failed.");
     }
-  }, [guardWriter]);
+  }, [guardWriter, writerFor]);
+
+  /**
+   * Withdraw: full exits from the chosen venues back to the user's own wallet, signed there. Works from Guard (a wallet
+   * session on live positions) and for a returning visitor after a scan. The scene drains those vaults as it runs.
+   */
+  const withdraw = useCallback(async (venues: VenueId[]) => {
+    const s = stateRef.current;
+    const g = s.guard;
+    const inGuard = !!g && g.session.source === "live" && !!g.session.address;
+    const address = inGuard ? g!.session.address! : s.positions?.address;
+    if (!address) return;
+    const from = (inGuard ? g!.data?.positions : s.positions?.list) ?? [];
+    const moves: Move[] = from.filter((p) => venues.includes(p.venue) && p.usd > 0)
+      .map((p) => ({ from: p.venue, to: "idle", usd: p.usd, bridge_required: false, why: "Withdraw to your wallet" }));
+    setState((x) => ({ ...x, exit: { venues, moves, from, address, execution: { mode: "live", by: "wallet", status: "running", checks: [], steps: [] } } }));
+    const patch = writerFor("exit");
+    try {
+      await walletRun("live", { kind: "withdraw", address, venues }, patch);
+    } catch (e) {
+      patch((ex) => ({ ...ex, status: "failed", error: e instanceof Error ? e.message : "The withdrawal stopped." }));
+    }
+  }, [writerFor]);
+
+  /** Closes a withdrawal and re-reads the positions (Guard re-scans; otherwise the wallet's positions reload). */
+  const finishExit = useCallback(() => {
+    const s = stateRef.current;
+    const address = s.exit?.address;
+    setState((x) => ({ ...x, exit: null }));
+    if (s.guard) void scanGuard();
+    else if (address) void loadPositions(address);
+  }, [scanGuard, loadPositions]);
 
   /** After the moves finish: simulated positions take the moves on board; live positions are simply re-read. */
   const applyMoves = useCallback(() => {
@@ -464,7 +593,7 @@ export function useT1000() {
 
   // Auto re-scan every minute while Guard is simply watching (paused during a feed, a proposal or moves).
   const g = state.guard;
-  const watching = !!g && g.feeding == null && !g.rebalance && !g.moves && !g.scanning;
+  const watching = !!g && g.feeding == null && !g.rebalance && !g.moves && !g.scanning && !state.exit;
   const lastScanAt = g?.lastScanAt ?? null;
   useEffect(() => {
     if (!watching || lastScanAt == null) return;
@@ -474,7 +603,7 @@ export function useT1000() {
 
   const reset = useCallback(() => { abortRef.current?.abort(); scanSeq.current++; epoch.current++; setState(initial); }, []);
   return {
-    state, scanWallet, run, reset, executePlan, executeWithWallet,
+    state, scanWallet, run, reset, executePlan, executeWithWallet, loadPositions, resumeWallet, withdraw, finishExit,
     enterGuard, scanGuard, setGuardSource, setScenario, feed, cancelFeed, proposeRebalance, executeMoves, applyMoves, dismissRebalance, resumeGuard,
   };
 }

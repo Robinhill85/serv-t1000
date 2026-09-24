@@ -21,5 +21,5 @@ export function rateAllow(store: Map<string, number[]>, key: string, now: number
   return true;
 }
 
-export const ASK_SUGGESTIONS = ["scan", "demo", "guide", "restart", "none"] as const;
+export const ASK_SUGGESTIONS = ["scan", "demo", "guide", "restart", "withdraw", "none"] as const;
 export type AskSuggestion = (typeof ASK_SUGGESTIONS)[number];

@@ -1,5 +1,5 @@
 "use client";
-import { Chat, type GuardActions } from "@/components/Chat";
+import { Chat, type GuardActions, type WalletActions } from "@/components/Chat";
 import { GuardHud } from "@/components/GuardHud";
 import { Hud } from "@/components/Hud";
 import { Intro, replayIntro } from "@/components/Intro";
@@ -34,6 +34,12 @@ export default function Home() {
   const g = state.guard;
   const guardView = !!g && g.feeding == null;
   const moveScene = g?.moves && g.movesFrom && g.rebalance?.plan ? rebalanceLegs(g.movesFrom, g.rebalance.plan.check.executable) : null;
+  // A withdrawal drains the chosen vaults back into the wallet (the same scene as a move to idle).
+  const exitScene = state.exit?.moves.length ? rebalanceLegs(state.exit.from, state.exit.moves) : null;
+  const walletActions: WalletActions = {
+    withdraw: (venues) => void t.withdraw(venues), resume: (target) => void t.resumeWallet(target),
+    positions: t.loadPositions, finishExit: t.finishExit,
+  };
 
   if (preview) return <main className="liquid-preview"><LiquidPreview mode={preview} /></main>;
   return (
@@ -52,9 +58,14 @@ export default function Home() {
             <LiquidScene legs={moveScene.to} from={moveScene.from} execution={g.moves} />
           </div>
         )}
+        {state.exit && exitScene && !g?.moves && (
+          <div className="liquid-layer">
+            <LiquidScene legs={exitScene.to} from={exitScene.from} execution={state.exit.execution} />
+          </div>
+        )}
       </section>
       <section className="split-chat" aria-label="Agent chat">
-        <Chat key={take} state={state} onScan={t.scanWallet} onRun={t.run} onReset={restart} onExecute={t.executePlan} onExecuteWallet={(m, p, pr) => void t.executeWithWallet(m, p, pr)} guard={guardActions} />
+        <Chat key={take} state={state} onScan={t.scanWallet} onRun={t.run} onReset={restart} onExecute={t.executePlan} onExecuteWallet={(m, p, pr) => void t.executeWithWallet(m, p, pr)} guard={guardActions} wallet={walletActions} />
       </section>
     </main>
     </WalletProvider>

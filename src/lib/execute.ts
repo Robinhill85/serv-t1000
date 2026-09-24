@@ -30,7 +30,12 @@ export type Step = {
   spends?: { token: Address; spender: Address; amount: bigint };
   /** For steps that need the agent to hold a token (vault shares, WETH): injected in simulation if not yet held. */
   holds?: { token: Address; amount: bigint };
+  /** Stable id within one plan (venue:action), so a wallet run can resume without repeating confirmed steps. */
+  key?: string;
 };
+
+/** Slippage for swaps: the agent path keeps 0.5%; wallet runs use 1% (a person may take a minute to confirm). */
+export type BuildOptions = { slippageBps?: bigint };
 
 /** gas: the simulation's estimate (decimal string), used for wallet runs' gas limits. */
 export type StepResult = { venue: VenueId; chain: ChainKey; label: string; ok: boolean; detail: string; hash?: Hex; explorer?: string; gas?: string };
@@ -38,6 +43,12 @@ export type StepResult = { venue: VenueId; chain: ChainKey; label: string; ok: b
 const vaultDepositAbi = parseAbi(["function deposit(uint256 assets, address receiver) returns (uint256 shares)"]);
 const vaultWithdrawAbi = parseAbi(["function withdraw(uint256 assets, address receiver, address owner) returns (uint256 shares)"]);
 const vaultReadAbi = parseAbi(["function convertToShares(uint256) view returns (uint256)", "function decimals() view returns (uint8)", "function minRedeemAssets() view returns (uint256)"]);
+const vault4626Abi = parseAbi([
+  "function maxRedeem(address owner) view returns (uint256)",
+  "function convertToAssets(uint256 shares) view returns (uint256)",
+  "function balanceOf(address) view returns (uint256)",
+  "function redeem(uint256 shares, address receiver, address owner) returns (uint256 assets)",
+]);
 const quoterAbi = parseAbi([
   "function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) returns (uint256 amountOut,uint160,uint32,uint256)",
 ]);
@@ -62,15 +73,16 @@ export function agentAddress(): Address {
 }
 
 /** Builds the ordered transactions for every leg of a plan. Reads live quotes and allowances. */
-export async function buildSteps(legs: Leg[], agent: Address): Promise<Step[]> {
+export async function buildSteps(legs: Leg[], agent: Address, opts: BuildOptions = {}): Promise<Step[]> {
+  const slippage = opts.slippageBps ?? SWAP_SLIPPAGE_BPS;
   const steps: Step[] = [];
   for (const leg of legs) {
     if (leg.venue === "base") {
       const amount = parseUnits(leg.usd.toFixed(6), 6);
       const vault = VENUES.base.address!;
       steps.push(
-        { venue: "base", chain: "base", label: "Approve USDC for the Morpho vault", to: TOKENS.base.USDC, abi: erc20Abi as unknown as Abi, functionName: "approve", args: [vault, amount] },
-        { venue: "base", chain: "base", label: "Deposit USDC into Gauntlet USDC Prime", to: vault, abi: vaultDepositAbi, functionName: "deposit", args: [amount, agent], spends: { token: TOKENS.base.USDC, spender: vault, amount } },
+        { key: "base:approve", venue: "base", chain: "base", label: "Approve USDC for the Morpho vault", to: TOKENS.base.USDC, abi: erc20Abi as unknown as Abi, functionName: "approve", args: [vault, amount] },
+        { key: "base:deposit", venue: "base", chain: "base", label: "Deposit USDC into Gauntlet USDC Prime", to: vault, abi: vaultDepositAbi, functionName: "deposit", args: [amount, agent], spends: { token: TOKENS.base.USDC, spender: vault, amount } },
       );
     } else if (leg.venue === "ixs") {
       const vault = KNOWN_VAULTS["avax-ixhyb"];
@@ -78,9 +90,9 @@ export async function buildSteps(legs: Leg[], agent: Address): Promise<Step[]> {
       const approve = buildApproveTx(vault, TOKENS.avalanche.USDC, human, 6);
       const request = buildRequestDepositTx(vault, agent, human, 6);
       steps.push(
-        { venue: "ixs", chain: "avalanche", label: "Approve USDC for the IXS vault", to: approve.address, abi: approve.abi as Abi, functionName: approve.functionName, args: approve.args },
+        { key: "ixs:approve", venue: "ixs", chain: "avalanche", label: "Approve USDC for the IXS vault", to: approve.address, abi: approve.abi as Abi, functionName: approve.functionName, args: approve.args },
         {
-          venue: "ixs", chain: "avalanche", label: "Request deposit into the IXS vault (settles T+1)", to: request.address, abi: request.abi as Abi,
+          key: "ixs:deposit", venue: "ixs", chain: "avalanche", label: "Request deposit into the IXS vault (settles T+1)", to: request.address, abi: request.abi as Abi,
           functionName: request.functionName, args: request.args,
           spends: { token: TOKENS.avalanche.USDC, spender: vault.address as Address, amount: parseUnits(human, 6) },
         },
@@ -92,11 +104,11 @@ export async function buildSteps(legs: Leg[], agent: Address): Promise<Step[]> {
         address: UNISWAP_RH.quoterV2, abi: quoterAbi, functionName: "quoteExactInputSingle",
         args: [{ tokenIn: TOKENS.robinhood.USDG, tokenOut: TOKENS.robinhood.WETH, amountIn, fee: UNISWAP_RH.wethUsdgFee, sqrtPriceLimitX96: 0n }],
       });
-      const minOut = (result[0] * (10_000n - SWAP_SLIPPAGE_BPS)) / 10_000n;
+      const minOut = (result[0] * (10_000n - slippage)) / 10_000n;
       steps.push(
-        { venue: "rh_eth", chain: "robinhood", label: "Approve USDG for the Uniswap router", to: TOKENS.robinhood.USDG, abi: erc20Abi as unknown as Abi, functionName: "approve", args: [UNISWAP_RH.swapRouter02, amountIn] },
+        { key: "rh_eth:approve", venue: "rh_eth", chain: "robinhood", label: "Approve USDG for the Uniswap router", to: TOKENS.robinhood.USDG, abi: erc20Abi as unknown as Abi, functionName: "approve", args: [UNISWAP_RH.swapRouter02, amountIn] },
         {
-          venue: "rh_eth", chain: "robinhood", label: `Swap USDG for ETH (min ${(Number(minOut) / 1e18).toFixed(6)} WETH)`, to: UNISWAP_RH.swapRouter02, abi: routerAbi,
+          key: "rh_eth:buy", venue: "rh_eth", chain: "robinhood", label: `Swap USDG for ETH (min ${(Number(minOut) / 1e18).toFixed(6)} WETH)`, to: UNISWAP_RH.swapRouter02, abi: routerAbi,
           functionName: "exactInputSingle",
           args: [{ tokenIn: TOKENS.robinhood.USDG, tokenOut: TOKENS.robinhood.WETH, fee: UNISWAP_RH.wethUsdgFee, recipient: agent, amountIn, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n }],
           spends: { token: TOKENS.robinhood.USDG, spender: UNISWAP_RH.swapRouter02, amount: amountIn },
@@ -113,18 +125,19 @@ export async function buildSteps(legs: Leg[], agent: Address): Promise<Step[]> {
  * Transactions for Guard-mode moves. Money going into a venue reuses the plan builders; money coming out uses
  * Morpho withdraw, a WETH->USDG swap, or an IXS redeem request (settles T+1). Only same-chain moves reach here.
  */
-export async function buildMoveSteps(moves: Move[], agent: Address, ethPriceUsd: number): Promise<Step[]> {
+export async function buildMoveSteps(moves: Move[], agent: Address, ethPriceUsd: number, opts: BuildOptions = {}): Promise<Step[]> {
+  const slippage = opts.slippageBps ?? SWAP_SLIPPAGE_BPS;
   const steps: Step[] = [];
   for (const m of moves) {
     if (m.from === "idle" && m.to !== "idle") {
-      steps.push(...(await buildSteps([{ venue: m.to, pct: 0, usd: m.usd }], agent)));
+      steps.push(...(await buildSteps([{ venue: m.to, pct: 0, usd: m.usd }], agent, opts)));
       continue;
     }
     if (m.from === "base") {
       const amount = parseUnits(m.usd.toFixed(6), 6);
       const shares = await publicClient("base").readContract({ address: VENUES.base.address!, abi: vaultReadAbi, functionName: "convertToShares", args: [amount] });
       steps.push({
-        venue: "base", chain: "base", label: `Withdraw $${m.usd.toFixed(2)} from Gauntlet USDC Prime`, to: VENUES.base.address!, abi: vaultWithdrawAbi,
+        key: "base:withdraw", venue: "base", chain: "base", label: `Withdraw $${m.usd.toFixed(2)} from Gauntlet USDC Prime`, to: VENUES.base.address!, abi: vaultWithdrawAbi,
         functionName: "withdraw", args: [amount, agent, agent], holds: { token: VENUES.base.address!, amount: (shares * 101n) / 100n },
       });
     } else if (m.from === "rh_eth") {
@@ -134,11 +147,11 @@ export async function buildMoveSteps(moves: Move[], agent: Address, ethPriceUsd:
         address: UNISWAP_RH.quoterV2, abi: quoterAbi, functionName: "quoteExactInputSingle",
         args: [{ tokenIn: TOKENS.robinhood.WETH, tokenOut: TOKENS.robinhood.USDG, amountIn: wethIn, fee: UNISWAP_RH.wethUsdgFee, sqrtPriceLimitX96: 0n }],
       });
-      const minOut = (result[0] * (10_000n - SWAP_SLIPPAGE_BPS)) / 10_000n;
+      const minOut = (result[0] * (10_000n - slippage)) / 10_000n;
       steps.push(
-        { venue: "rh_eth", chain: "robinhood", label: "Approve WETH for the Uniswap router", to: TOKENS.robinhood.WETH, abi: erc20Abi as unknown as Abi, functionName: "approve", args: [UNISWAP_RH.swapRouter02, wethIn], holds: { token: TOKENS.robinhood.WETH, amount: wethIn } },
+        { key: "rh_eth:approve-weth", venue: "rh_eth", chain: "robinhood", label: "Approve WETH for the Uniswap router", to: TOKENS.robinhood.WETH, abi: erc20Abi as unknown as Abi, functionName: "approve", args: [UNISWAP_RH.swapRouter02, wethIn], holds: { token: TOKENS.robinhood.WETH, amount: wethIn } },
         {
-          venue: "rh_eth", chain: "robinhood", label: `Trim ETH: swap ${(Number(wethIn) / 1e18).toFixed(6)} WETH for at least $${(Number(minOut) / 1e6).toFixed(2)} USDG`,
+          key: "rh_eth:sell", venue: "rh_eth", chain: "robinhood", label: `Trim ETH: swap ${(Number(wethIn) / 1e18).toFixed(6)} WETH for at least $${(Number(minOut) / 1e6).toFixed(2)} USDG`,
           to: UNISWAP_RH.swapRouter02, abi: routerAbi, functionName: "exactInputSingle",
           args: [{ tokenIn: TOKENS.robinhood.WETH, tokenOut: TOKENS.robinhood.USDG, fee: UNISWAP_RH.wethUsdgFee, recipient: agent, amountIn: wethIn, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n }],
           spends: { token: TOKENS.robinhood.WETH, spender: UNISWAP_RH.swapRouter02, amount: wethIn },
@@ -154,7 +167,7 @@ export async function buildMoveSteps(moves: Move[], agent: Address, ethPriceUsd:
       ]);
       const tx = buildRequestRedeemTx(vault, agent, formatUnits(shares, decimals), decimals);
       steps.push({
-        venue: "ixs", chain: "avalanche", label: `Request IXS exit of ~$${m.usd.toFixed(2)} (settles T+1, 0.5% fee)`, to: tx.address, abi: tx.abi as Abi,
+        key: "ixs:redeem", venue: "ixs", chain: "avalanche", label: `Request IXS exit of ~$${m.usd.toFixed(2)} (settles T+1, 0.5% fee)`, to: tx.address, abi: tx.abi as Abi,
         functionName: tx.functionName, args: tx.args, holds: { token: vault.address as Address, amount: shares },
       });
     } else {
@@ -165,6 +178,71 @@ export async function buildMoveSteps(moves: Move[], agent: Address, ethPriceUsd:
 }
 
 /** The IXS vault's live minimum exit, in USD. */
+/**
+ * Withdraw: full exits from the chosen venues back to the owner's wallet, sized from what the owner holds right now.
+ * Base redeems every share (instant, interest included); ETH sells all WETH for USDG; IXS requests the exit of all
+ * settled shares (T+1, 0.5% fee). notes explain anything that can't exit yet (e.g. an IXS deposit still settling).
+ */
+export async function buildExitSteps(venues: VenueId[], owner: Address, opts: BuildOptions = {}): Promise<{ steps: Step[]; notes: string[] }> {
+  const slippage = opts.slippageBps ?? SWAP_SLIPPAGE_BPS;
+  const steps: Step[] = [];
+  const notes: string[] = [];
+  if (venues.includes("base")) {
+    const c = publicClient("base");
+    const vault = VENUES.base.address!;
+    const shares = await c.readContract({ address: vault, abi: vault4626Abi, functionName: "maxRedeem", args: [owner] });
+    if (shares > 0n) {
+      const assets = await c.readContract({ address: vault, abi: vault4626Abi, functionName: "convertToAssets", args: [shares] });
+      steps.push({
+        key: "base:redeem", venue: "base", chain: "base", label: `Withdraw everything from Gauntlet USDC Prime (~$${Number(formatUnits(assets, 6)).toFixed(2)})`,
+        to: vault, abi: vault4626Abi as unknown as Abi, functionName: "redeem", args: [shares, owner, owner],
+      });
+    } else notes.push("Nothing to withdraw from Base USDC lending.");
+  }
+  if (venues.includes("rh_eth")) {
+    const c = publicClient("robinhood");
+    const weth = await c.readContract({ address: TOKENS.robinhood.WETH, abi: erc20Abi, functionName: "balanceOf", args: [owner] });
+    if (weth > 0n) {
+      const { result } = await c.simulateContract({
+        address: UNISWAP_RH.quoterV2, abi: quoterAbi, functionName: "quoteExactInputSingle",
+        args: [{ tokenIn: TOKENS.robinhood.WETH, tokenOut: TOKENS.robinhood.USDG, amountIn: weth, fee: UNISWAP_RH.wethUsdgFee, sqrtPriceLimitX96: 0n }],
+      });
+      const minOut = (result[0] * (10_000n - slippage)) / 10_000n;
+      steps.push(
+        { key: "rh_eth:approve-weth", venue: "rh_eth", chain: "robinhood", label: "Approve WETH for the Uniswap router", to: TOKENS.robinhood.WETH, abi: erc20Abi as unknown as Abi, functionName: "approve", args: [UNISWAP_RH.swapRouter02, weth] },
+        {
+          key: "rh_eth:sell", venue: "rh_eth", chain: "robinhood", label: `Sell ${Number(formatUnits(weth, 18)).toFixed(6)} WETH for at least $${Number(formatUnits(minOut, 6)).toFixed(2)} USDG`,
+          to: UNISWAP_RH.swapRouter02, abi: routerAbi, functionName: "exactInputSingle",
+          args: [{ tokenIn: TOKENS.robinhood.WETH, tokenOut: TOKENS.robinhood.USDG, fee: UNISWAP_RH.wethUsdgFee, recipient: owner, amountIn: weth, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n }],
+          spends: { token: TOKENS.robinhood.WETH, spender: UNISWAP_RH.swapRouter02, amount: weth },
+        },
+      );
+    } else notes.push("No ETH to sell on Robinhood Chain.");
+  }
+  if (venues.includes("ixs")) {
+    const vault = KNOWN_VAULTS["avax-ixhyb"];
+    const c = publicClient("avalanche");
+    const [shares, decimals] = await Promise.all([
+      c.readContract({ address: vault.address as Address, abi: vault4626Abi, functionName: "balanceOf", args: [owner] }),
+      c.readContract({ address: vault.address as Address, abi: vaultReadAbi, functionName: "decimals" }),
+    ]);
+    if (shares > 0n) {
+      const assets = await c.readContract({ address: vault.address as Address, abi: vault4626Abi, functionName: "convertToAssets", args: [shares] });
+      const min = await ixsRedeemMinUsd();
+      const usd = Number(formatUnits(assets, 6));
+      if (usd < min) notes.push(`Your IXS position ($${usd.toFixed(2)}) is under the vault's $${min} exit minimum.`);
+      else {
+        const tx = buildRequestRedeemTx(vault, owner, formatUnits(shares, decimals), decimals);
+        steps.push({
+          key: "ixs:redeem", venue: "ixs", chain: "avalanche", label: `Request IXS exit of ~$${usd.toFixed(2)} (settles T+1, 0.5% fee)`,
+          to: tx.address, abi: tx.abi as Abi, functionName: tx.functionName, args: tx.args,
+        });
+      }
+    } else notes.push("No settled IXS shares to exit yet. A deposit still settling (T+1) can exit once its shares arrive.");
+  }
+  return { steps, notes };
+}
+
 export async function ixsRedeemMinUsd(): Promise<number> {
   const c = publicClient("avalanche");
   const min = await c.readContract({ address: KNOWN_VAULTS["avax-ixhyb"].address, abi: vaultReadAbi, functionName: "minRedeemAssets" }).catch(() => 0n);
