@@ -1,7 +1,8 @@
 "use client";
 // Cold open: plays once per browser session (and again on Restart), skippable from the first frame. The last beat (the pupil opening
 // into the HUD) is done here in code, so it lands exactly on the live interface rather than a baked frame.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { isSoundtrackPlaying, LEVEL, playSoundtrack, setSoundtrackLevel, soundStore } from "@/lib/soundtrack";
 
 const SEEN_KEY = "t1000-intro-seen";
 
@@ -18,6 +19,8 @@ export function replayIntro() {
   if (new URLSearchParams(window.location.search).get("intro") === "0") { markDone(); return; }
   (window as unknown as { __t1000IntroDone?: boolean }).__t1000IntroDone = false;
   window.dispatchEvent(new Event(REPLAY_EVENT));
+  // Restart is a click, so the soundtrack may restart with the cold open.
+  if (isSoundtrackPlaying()) playSoundtrack({ fromStart: true, level: LEVEL.intro });
 }
 export function whenIntroDone(cb: () => void) {
   if ((window as unknown as { __t1000IntroDone?: boolean }).__t1000IntroDone) cb();
@@ -29,6 +32,15 @@ type Stage = "hidden" | "playing" | "opening";
 export function Intro({ src, poster }: { src: string; poster?: string }) {
   const [stage, setStage] = useState<Stage>("hidden");
   const videoRef = useRef<HTMLVideoElement>(null);
+  const soundOn = useSyncExternalStore(soundStore.subscribe, soundStore.get, soundStore.getServer);
+  const [withSound, setWithSound] = useState(false);
+  /** The cold open with its soundtrack: restart the video and the track together. */
+  const playWithSound = () => {
+    const v = videoRef.current;
+    if (v) { v.currentTime = 0; void v.play().catch(() => {}); }
+    playSoundtrack({ fromStart: true, level: LEVEL.intro });
+    setWithSound(true);
+  };
 
   useEffect(() => {
     let seen = false;
@@ -52,6 +64,7 @@ export function Intro({ src, poster }: { src: string; poster?: string }) {
   const open = useCallback(() => {
     try { sessionStorage.setItem(SEEN_KEY, "1"); } catch { /* ignore */ }
     setStage("opening");
+    setSoundtrackLevel(LEVEL.app, 2.5); // the soundtrack settles into a quiet bed under the app
     window.setTimeout(() => { setStage("hidden"); markDone(); }, 1100);
   }, []);
 
@@ -78,7 +91,10 @@ export function Intro({ src, poster }: { src: string; poster?: string }) {
         onError={open}
       />
       <div className="intro-iris" aria-hidden />
-      <button className="intro-skip" onClick={open}>Skip</button>
+      <div className="intro-actions">
+        {soundOn && !withSound && <button className="intro-skip" onClick={playWithSound}>Sound on</button>}
+        <button className="intro-skip" onClick={open}>Skip</button>
+      </div>
     </div>
   );
 }

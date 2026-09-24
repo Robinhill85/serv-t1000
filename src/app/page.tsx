@@ -5,7 +5,8 @@ import { Hud } from "@/components/Hud";
 import { Intro, replayIntro } from "@/components/Intro";
 import { LiquidScene, rebalanceLegs } from "@/components/LiquidScene";
 import { LiquidPreview } from "@/components/LiquidPreview";
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import { installSoundtrack } from "@/lib/soundtrack";
 import { useT1000 } from "@/lib/use-t1000";
 import { WalletProvider } from "@/components/WalletProvider";
 
@@ -21,6 +22,8 @@ export default function Home() {
   const preview = useSyncExternalStore(subscribe, readPreview, () => null);
   // Restart = a fresh visit: clear the run, replay the intro, and remount the chat (a ?demo= script plays again).
   const [take, setTake] = useState(0);
+  // Background soundtrack: starts on the first click/tap/key (louder while the intro is on screen).
+  useEffect(() => installSoundtrack(() => !!document.querySelector(".intro")), []);
   const restart = () => { t.reset(); replayIntro(); setTake((n) => n + 1); };
   const guardActions: GuardActions = {
     enter: t.enterGuard, scan: () => void t.scanGuard(), setSource: t.setGuardSource, setScenario: t.setScenario,

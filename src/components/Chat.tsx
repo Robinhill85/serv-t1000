@@ -7,6 +7,7 @@ import { DRIFT_PP } from "@/lib/rulebook";
 import { GUARD_STORE_KEY, type Execution, type GuardSource, type GuardSession, type RunState, type ScanResult } from "@/lib/use-t1000";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { WalletGuide } from "@/components/WalletGuide";
+import { setSoundEnabled, soundStore } from "@/lib/soundtrack";
 
 type Step = {
   key: keyof Profile;
@@ -149,6 +150,7 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
   // Discovered wallets (EIP-6963) replace the generic "Injected" entry when there are any.
   const walletOptions = connectors.filter((c) => !(c.id === "injected" && connectors.some((o) => o.type === "injected" && o.id !== "injected")));
   const [guideOpen, setGuideOpen] = useState(false);
+  const soundOn = useSyncExternalStore(soundStore.subscribe, soundStore.get, soundStore.getServer);
   const [riskOk, setRiskOk] = useState(false);
   const storedMine = useSyncExternalStore(noopSubscribe, () => readStoredWalletGuard(connected), () => null);
   const walletMode = !!state.wallet;
@@ -336,6 +338,12 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
       <div className="chat-head">
         <span className="chat-dot" /> T1000 agent
         <button className="chat-guide" onClick={() => setGuideOpen(true)}>Use your own wallet</button>
+        <button className="chat-sound" onClick={() => setSoundEnabled(!soundOn)} aria-label={soundOn ? "Mute soundtrack" : "Play soundtrack"} title={soundOn ? "Mute soundtrack" : "Play soundtrack"}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M11 5 6 9H3v6h3l5 4z" />
+            {soundOn ? <><path d="M15.5 8.5a5 5 0 0 1 0 7" /><path d="M18.5 5.5a9 9 0 0 1 0 13" /></> : <><path d="m16 9 5 6" /><path d="m21 9-5 6" /></>}
+          </svg>
+        </button>
         <button className="chat-reset" onClick={onReset} title="Start again from the intro">Restart</button>
       </div>
 

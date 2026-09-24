@@ -254,12 +254,13 @@ html, body { height: 100%; background: #000; color: var(--chat-text); font-famil
 .intro.is-opening { animation: intro-dissolve 0.35s ease-out 0.75s forwards; }
 @keyframes intro-pupil { to { clip-path: circle(75% at 50% 50%); } }
 @keyframes intro-dissolve { to { opacity: 0; } }
+.intro-actions { position: absolute; right: 20px; bottom: 20px; display: flex; gap: 10px; }
 .intro-skip {
-  position: absolute; right: 20px; bottom: 20px; padding: 8px 14px; border-radius: 8px;
+  padding: 8px 14px; border-radius: 8px;
   background: rgba(0, 0, 0, 0.55); border: 1px solid rgba(255, 255, 255, 0.25); color: #fff; font-size: 13px;
 }
 .intro-skip:hover { border-color: var(--chat-accent); }
-.intro.is-opening .intro-skip { display: none; }
+.intro.is-opening .intro-actions { display: none; }
 
 /* tiny panel (short phones, split panes): the list and stamp only; amounts live in the chat */
 @container hud (max-height: 420px) {
@@ -356,7 +357,10 @@ html, body { height: 100%; background: #000; color: var(--chat-text); font-famil
 
 /* ---------- "My wallet" mode ---------- */
 .chat-guide { margin-left: auto; font-weight: 500; font-size: 13px; color: var(--chat-accent); }
-.chat-guide + .chat-reset { margin-left: 12px; }
+.chat-guide + .chat-sound { margin-left: 10px; }
+.chat-sound { display: inline-flex; align-items: center; color: var(--chat-muted); padding: 2px; }
+.chat-sound:hover { color: var(--chat-text); }
+.chat-sound + .chat-reset { margin-left: 10px; }
 .wallet-box { border: 1px solid var(--chat-line); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 8px; background: var(--chat-panel); }
 .wallet-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--chat-muted); }
 .wallet-row { display: flex; align-items: center; gap: 8px; }
