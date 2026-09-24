@@ -12,7 +12,11 @@ const A = (...p) => path.join(ROOT, "assets", ...p);
 const TAKE = A("takes", "take3", "take3.mp4");
 const INTRO = path.join(ROOT, "public", "intro", "t1000-intro.mp4");
 const VO = A("vo", "arthur-vo-v3.mp3");
-const VO_LINES = JSON.parse(fs.readFileSync(A("vo", "arthur-vo-v3.lines.json"), "utf8")).lines;
+const VO_LINES = [
+  ...JSON.parse(fs.readFileSync(A("vo", "arthur-vo-v3.lines.json"), "utf8")).lines.map((l) => ({ ...l, file: VO })),
+  // Added after v1 (Robin): Arthur naming Jev on the classification beat. Same voice, separate file.
+  { beat: "jev", file: A("vo", "arthur-jev-line.mp3"), start: 0, end: 5.04, text: "Jev, by TypeSafe, classifies each answer instantly." },
+];
 const argv = process.argv.slice(2);
 const opt = (k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : null; };
 const MUSIC = opt("--music");
@@ -57,7 +61,7 @@ const CAPTIONS = [
   { t: [79.7, 85.5], text: "Back to plan: 70 / 20 / 10" },
 ];
 // Start of each VO line (by beat); "end" is placed on the end card instead.
-const VO_AT = { idle: 1.5, decides: 9.5, "own-words": 19.6, scan: 30.0, serv: 36.6, execute: 46.4, watch: 52.8, rebalance: 61.0, end: 86.6 };
+const VO_AT = { idle: 1.5, decides: 9.5, "own-words": 19.6, jev: 23.0, scan: 30.0, serv: 36.6, execute: 46.4, watch: 52.8, rebalance: 61.0, end: 86.6 };
 
 async function renderStills(bodyEnd) {
   const browser = await chromium.launch({ executablePath: process.env.CHROME || undefined });
@@ -130,17 +134,18 @@ async function renderStills(bodyEnd) {
   const vOut = `v${CAPTIONS.length}`;
 
   // 4. Audio: each VO line cut from Arthur's read and placed on its beat; optional music bed ducked under the voice.
-  const voIdx = 3 + caps.length;
-  inputs.push("-i", VO);
+  const voFiles = [...new Set(VO_LINES.map((l) => l.file))];
+  const voIdxOf = (f) => 3 + caps.length + voFiles.indexOf(f);
+  voFiles.forEach((f) => inputs.push("-i", f));
   VO_LINES.forEach((l, k) => {
     const at = l.beat === "end" ? bodyEnd - 0.6 + 0.45 : VO_AT[l.beat] / PACE;
     const len = (l.end - l.start + 0.02) / PACE;
-    g += `[${voIdx}:a]atrim=start=${Math.max(0, l.start - 0.05)}:end=${l.end + 0.12},asetpts=PTS-STARTPTS,atempo=${PACE},afade=t=out:st=${len.toFixed(3)}:d=0.1,adelay=delays=${Math.round(at * 1000)}:all=1[vo${k}];`;
+    g += `[${voIdxOf(l.file)}:a]atrim=start=${Math.max(0, l.start - 0.05)}:end=${l.end + 0.12},asetpts=PTS-STARTPTS,atempo=${PACE},afade=t=out:st=${len.toFixed(3)}:d=0.1,adelay=delays=${Math.round(at * 1000)}:all=1[vo${k}];`;
   });
   g += VO_LINES.map((_, k) => `[vo${k}]`).join("") + `amix=inputs=${VO_LINES.length}:normalize=0,apad,atrim=end=${total.toFixed(3)},aformat=channel_layouts=stereo[voice];`;
   let aOut = "voice";
   if (MUSIC) {
-    const mIdx = voIdx + 1;
+    const mIdx = 3 + caps.length + voFiles.length;
     inputs.push("-i", MUSIC);
     // Music carries the intro, then sits low; the sidechain ducks it further whenever Arthur speaks.
     g += `[voice]asplit=2[voice1][key];`;
