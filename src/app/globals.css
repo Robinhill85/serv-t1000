@@ -379,3 +379,8 @@ html, body { height: 100%; background: #000; color: var(--chat-text); font-famil
 .guide-body ol { list-style: decimal; }
 .guide-body p { margin: 6px 0; }
 .split-chat { position: relative; }
+
+/* ---------- Ask T1000 ---------- */
+.msg-suggest { display: block; margin-top: 8px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--chat-accent); color: var(--chat-text); font-size: 13px; }
+.msg-suggest:hover { background: #2a1512; }
+.ask-row input { border-style: dashed; }

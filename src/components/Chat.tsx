@@ -8,6 +8,7 @@ import { GUARD_STORE_KEY, type Execution, type GuardSource, type GuardSession, t
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { WalletGuide } from "@/components/WalletGuide";
 import { setSoundEnabled, soundStore } from "@/lib/soundtrack";
+import { looksLikeQuestion, type AskSuggestion } from "@/lib/ask-shape";
 
 type Step = {
   key: keyof Profile;
@@ -32,7 +33,7 @@ const STEPS: Step[] = [
   { key: "goal", ask: "Anything else about your goal? One line, or skip.", options: [{ label: "Skip", value: "" }], placeholder: "e.g. park it for 6 months, some upside is fine" },
 ];
 
-type Msg = { from: "agent" | "user"; text: string; kicker?: string };
+type Msg = { from: "agent" | "user"; text: string; kicker?: string; suggest?: AskSuggestion };
 
 export type GuardActions = {
   enter: () => void;
@@ -190,6 +191,13 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
 
   const say = (m: Msg) => setMsgs((x) => [...x, m]);
 
+  // Q&A while a plan, run or Guard card is on screen goes below those cards (else it would land above them, out of
+  // view); it joins the history when the run is written into the log.
+  const [tail, setTail] = useState<Msg[]>([]);
+  const tailRef = useRef<Msg[]>([]);
+  useEffect(() => { tailRef.current = tail; }, [tail]);
+  const flushTail = () => { if (tailRef.current.length) { const t = tailRef.current; setMsgs((x) => [...x, ...t]); setTail([]); tailRef.current = []; } };
+
   // A finished deploy (or feed) is written into the log, then the vision hands over to Guard mode.
   const handedOff = useRef<Execution | null>(null);
   const feeding = state.guard?.feeding ?? null;
@@ -200,6 +208,7 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
     const summary = (state.verified?.revised ? state.verified.result.decision : state.fast?.result.decision)?.summary;
     const id = setTimeout(() => {
       handedOff.current = ex;
+      flushTail();
       const total = plan.legs.reduce((a, l) => a + l.usd, 0);
       say({
         from: "agent",
@@ -226,6 +235,7 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
     if (!moves || moves.status !== "done" || !movePlan || movesHandedOff.current === moves) return;
     const id = setTimeout(() => {
       movesHandedOff.current = moves;
+      flushTail();
       say({
         from: "agent",
         kicker: `Rebalanced · ${moves.mode === "live" ? "live" : "simulated"}`,
@@ -261,7 +271,8 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function scan() {
+  const scan = () => scanWith(address);
+  async function scanWith(address: string) {
     if (!/^0x[0-9a-fA-F]{40}$/.test(address)) { say({ from: "agent", text: "That doesn't look like a wallet address." }); return; }
     say({ from: "user", text: `Scan ${short(address)} (demo)` });
     const r = await onScan(address);
@@ -294,6 +305,58 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
   }
 
   const [busy, setBusy] = useState(false);
+
+  // ---------- Ask T1000 (free-form questions, answered by SERV; talk only) ----------
+  const [asking, setAsking] = useState(false);
+  const [askDraft, setAskDraft] = useState("");
+  const blocksShown = !!(state.plan || state.execution || state.guard);
+
+  function askContext(): Record<string, unknown> {
+    const chain = (c: "base" | "avalanche" | "robinhood") => ({
+      stable: Math.round((state.holdings ?? []).filter((h) => h.chain === c && h.stable).reduce((a, h) => a + h.amount, 0) * 100) / 100,
+      gas: (state.holdings ?? []).filter((h) => h.chain === c && !h.stable && h.symbol !== "WETH").reduce((a, h) => a + h.amount, 0),
+    });
+    const g = state.guard?.data;
+    const failed = state.execution?.steps.filter((x) => x.ok === false).map((x) => `${x.label}: ${x.detail}`) ?? [];
+    return {
+      mode: walletMode ? "my wallet (real funds, the user signs)" : state.holdings ? "demo (simulation, nothing is sent)" : "not scanned yet",
+      wallet_connected: !!connected,
+      current_question: current?.ask ?? null,
+      phase: state.guard ? "guard" : state.plan ? "plan shown" : state.phase,
+      wallet: state.holdings ? { base: chain("base"), avalanche: chain("avalanche"), robinhood: chain("robinhood"), idle_total_usd: state.idleStablesUsd } : null,
+      answers_so_far: profile,
+      plan: state.plan ? { legs: state.plan.legs, blocked: state.plan.blocked, adjustments: state.plan.adjustments, excluded: (state.verified?.result.decision ?? state.fast?.result.decision)?.blocked ?? [] } : null,
+      last_run: state.execution ? { mode: state.execution.mode, by: state.execution.by ?? "agent", status: state.execution.status, failed } : null,
+      guard: g ? { source: g.source, positions: g.positions.map((x) => ({ venue: x.venue, usd: x.usd, status: x.status })), triggers: g.triggers } : null,
+    };
+  }
+
+  async function ask(q: string) {
+    const push = (m: Msg) => (blocksShown ? setTail((t) => [...t, m]) : say(m));
+    push({ from: "user", text: q });
+    setAsking(true);
+    try {
+      const res = await fetch("/api/ask", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: q.slice(0, 400), context: askContext() }) });
+      const r = (await res.json()) as { ok: boolean; answer?: string; suggest?: AskSuggestion; ms?: number; error?: string };
+      if (r.ok && r.answer) push({ from: "agent", kicker: `T1000 · SERV · ${((r.ms ?? 0) / 1000).toFixed(1)}s`, text: r.answer, suggest: r.suggest && r.suggest !== "none" ? r.suggest : undefined });
+      else push({ from: "agent", text: r.error ?? "I couldn't answer that just now." });
+    } catch {
+      push({ from: "agent", text: "I couldn't answer that just now. Try again in a moment." });
+    } finally {
+      setAsking(false);
+    }
+    if (current) say({ from: "agent", text: current.ask }); // back to the step the visitor was on
+  }
+
+  function runSuggestion(sg: AskSuggestion) {
+    if (sg === "guide") setGuideOpen(true);
+    else if (sg === "restart") onReset();
+    else if (sg === "demo") { setAddress(DEMO_WALLET); void scanWith(DEMO_WALLET); }
+    else if (sg === "scan") { if (connected) void scanMine(); else setGuideOpen(true); }
+  }
+  const SUGGEST_LABEL: Record<Exclude<AskSuggestion, "none">, string> = {
+    scan: connected ? "Scan my wallet" : "How to connect a wallet", demo: "Try the demo", guide: "Open the wallet guide", restart: "Restart",
+  };
 
   /** Records one answer. `shown` is the user's bubble; `echo` is the agent's read-back when it interpreted free text. */
   function answer(shown: string, value: Profile[keyof Profile], echo?: string) {
@@ -328,6 +391,8 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
     const s = STEPS[step];
     const t = text.trim();
     if (!t || busy) return;
+    // A question mid-form gets answered (then the step is asked again) instead of being read as an answer.
+    if (looksLikeQuestion(t)) { setDraft(""); await ask(t); return; }
     if (s.key === "goal") { answer(t, t.slice(0, 400)); return; }
     setBusy(true);
     try {
@@ -372,6 +437,7 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
           <div key={i} className={`msg msg-${m.from}`}>
             {m.kicker && <div className="msg-kicker">{m.kicker}</div>}
             {m.text}
+            {m.suggest && m.suggest !== "none" && <button className="msg-suggest" onClick={() => runSuggestion(m.suggest!)}>{SUGGEST_LABEL[m.suggest]}</button>}
           </div>
         ))}
 
@@ -460,6 +526,14 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
         {state.guard?.moves && feeding == null && <ExecutionView ex={state.guard.moves} title="Moves" />}
 
         {state.phase === "error" && <div className="msg msg-agent msg-error">{state.error}</div>}
+        {tail.map((m, i) => (
+          <div key={`t${i}`} className={`msg msg-${m.from}`}>
+            {m.kicker && <div className="msg-kicker">{m.kicker}</div>}
+            {m.text}
+            {m.suggest && m.suggest !== "none" && <button className="msg-suggest" onClick={() => runSuggestion(m.suggest!)}>{SUGGEST_LABEL[m.suggest]}</button>}
+          </div>
+        ))}
+        {asking && <div className="chat-wait">T1000 is thinking…</div>}
       </div>
 
       <div className="chat-input">
@@ -521,6 +595,12 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
           </>
         )}
         {step >= STEPS.length && !state.guard && state.phase !== "done" && state.phase !== "error" && <div className="chat-wait">T1000 is thinking…</div>}
+        {!current && feeding == null && (
+          <form className="chat-row ask-row" onSubmit={(e) => { e.preventDefault(); const q = askDraft.trim(); if (q && !asking) { setAskDraft(""); void ask(q); } }}>
+            <input value={askDraft} onChange={(e) => setAskDraft(e.target.value)} maxLength={400} placeholder="Ask T1000 anything about this…" aria-label="Ask T1000" disabled={asking} />
+            <button type="submit" disabled={asking || !askDraft.trim()}>{asking ? "Thinking…" : "Ask"}</button>
+          </form>
+        )}
       </div>
     </div>
   );
