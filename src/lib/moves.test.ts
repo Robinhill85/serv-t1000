@@ -43,3 +43,14 @@ describe("checkMoves", () => {
     expect(r.errors.join()).toMatch(/over the 20% cap/);
   });
 });
+
+describe("trimToTarget", () => {
+  it("returns the exact trim that lands the weight on target", async () => {
+    const { trimToTarget } = await import("./rebalance");
+    // ETH $25.47 of $160.47 held (15.9%) with a 10% target.
+    const x = trimToTarget(25.47, 160.47, 10);
+    expect((25.47 - x) / (160.47 - x)).toBeCloseTo(0.1, 3);
+    expect(trimToTarget(10, 160, 10)).toBe(0); // below target: nothing to trim
+    expect(trimToTarget(5, 0, 10)).toBe(0);
+  });
+});

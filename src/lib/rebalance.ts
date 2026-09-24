@@ -13,6 +13,8 @@ export type MoveEnd = (typeof MOVE_ENDS)[number];
 export type Move = { from: MoveEnd; to: MoveEnd; usd: number; bridge_required: boolean; why: string };
 export type RebalanceDecision = { moves: Move[]; summary: string };
 
+// SERV's Prompt Guard screens the verified call. A wording that talks about how the input was "computed in code" or
+// shouts (ABOVE) got every verify refused ("I can't share that."); this version passed 6/6. Re-test after edits.
 export const REBALANCE_PROMPT = `You are T1000 in Guard mode. The user's capital is already deployed. One or more guard triggers fired. Propose the fewest moves that restore the intent of the user's plan, or no moves if acting would cost more than it saves.
 
 Venues: ixs = licensed RWA bond vault on Avalanche (exits settle T+1 with a 0.5% fee, deposits minimum $100); base = USDC lending on Base (instant in and out); rh_eth = ETH on Robinhood Chain (volatile). "idle" = the stablecoins the agent holds on that venue's chain.
@@ -23,8 +25,10 @@ Non-negotiable constraints:
 - Deposits into ixs are at least $100. Ignore moves under $5.
 - After the moves, the volatile share must be within the volatile cap.
 
+Each position lists weight_pct, target_pct and drift_pp (weight minus target; positive means above target).
+
 Policy:
-- DRIFT on a volatile leg: trim it back toward its target by moving the excess to idle on its chain.
+- DRIFT on a volatile leg above its target (drift_pp > 0): trim it by its trim_to_target_usd, moving the excess to idle on its chain.
 - DRIFT on a stable leg: prefer holding unless the gap is large; stable legs drift only through other legs moving.
 - YIELD_GAP: leaving ixs costs 0.5% and a day. Only exit ixs when the yield gap is clearly negative and the horizon allows; moving the proceeds to base needs a bridge, so propose it with bridge_required true and explain.
 - VAULT_RULE: if the ixs vault is paused or whitelisted, the agent may be unable to exit; propose holding and explain what the agent will watch.
@@ -65,6 +69,19 @@ const JSON_SCHEMA = {
 const SHADOW_HINT =
   "Every move with bridge_required=false has exactly one side 'idle'; no move exceeds the position or the idle funds on that chain; ixs deposits are at least $100; the resulting volatile share is within volatile_cap_pct.";
 
+const round1 = (n: number) => Math.round(n * 10) / 10;
+
+/**
+ * The amount to move from a position to idle so its weight lands on the target. Moving x out of the held total:
+ * (usd - x) / (total - x) = t  =>  x = (usd - t*total) / (1 - t). Zero when the position is at or below target.
+ */
+export function trimToTarget(usd: number, total: number, targetPct: number): number {
+  const t = targetPct / 100;
+  if (total <= 0 || t >= 1) return 0;
+  const x = (usd - t * total) / (1 - t);
+  return x > 0 ? Math.round(x * 100) / 100 : 0;
+}
+
 export function rebalanceInput(args: {
   profile: Pick<Profile, "preference" | "risk" | "horizon" | "instantAccess">;
   targets: Split;
@@ -80,9 +97,14 @@ export function rebalanceInput(args: {
     volatile_cap_pct: volatileCap(args.profile),
     liquidity_buffer_pct: LIQUIDITY_BUFFER_PCT,
     targets_pct: args.targets,
-    positions: args.positions.map((p) => ({
-      venue: p.venue, chain: VENUES[p.venue].chain, usd: p.usd, weight_pct: total > 0 ? Math.round((p.usd / total) * 1000) / 10 : 0, status: p.status,
-    })),
+    positions: args.positions.map((p) => {
+      const weight = total > 0 ? (p.usd / total) * 100 : 0;
+      const target = args.targets[p.venue] ?? 0;
+      return {
+        venue: p.venue, chain: VENUES[p.venue].chain, usd: p.usd, weight_pct: round1(weight), target_pct: target,
+        drift_pp: round1(weight - target), trim_to_target_usd: trimToTarget(p.usd, total, target), status: p.status,
+      };
+    }),
     triggers: args.triggers,
     idle_by_chain_usd: args.idleByChain,
     signals: {
