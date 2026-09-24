@@ -413,6 +413,19 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
   }
 
   const current = step >= 0 && step < STEPS.length ? STEPS[step] : null;
+  // Wallet mode: what can actually be deployed. Base (with gas) and Avalanche only at the IXS $100 minimum (with gas);
+  // Robinhood USDG only funds ETH if the user opts in later, so it isn't counted as "all of it".
+  const deployable = (() => {
+    const hold = (c: "base" | "avalanche") => {
+      const stable = (state.holdings ?? []).filter((h) => h.chain === c && h.stable).reduce((a, h) => a + h.amount, 0);
+      const gas = (state.holdings ?? []).filter((h) => h.chain === c && !h.stable && h.symbol !== "WETH").reduce((a, h) => a + h.amount, 0);
+      return gas >= GAS_MIN[c] ? stable : 0;
+    };
+    const base = hold("base");
+    const avax = hold("avalanche");
+    const total = (base >= 1 ? base : 0) + (avax >= VENUES.ixs.minUsd ? avax : 0);
+    return Math.floor(Math.min(total, state.walletMaxRunUsd ?? Infinity) * 100) / 100;
+  })();
   const fastDecision = state.fast?.result.decision;
   const verifiedDecision = state.verified?.result.decision;
   const reasons = useMemo(() => (verifiedDecision ?? fastDecision)?.reasons ?? [], [verifiedDecision, fastDecision]);
@@ -583,8 +596,8 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
         {current && !state.guard && (
           <>
             <div className="chips">
-              {(current.key === "amountUsd" && walletMode && state.idleStablesUsd
-                ? [{ label: `All of it (${usd(Math.min(state.idleStablesUsd, state.walletMaxRunUsd ?? Infinity))})`, value: Math.floor(Math.min(state.idleStablesUsd, state.walletMaxRunUsd ?? Infinity) * 100) / 100 }]
+              {(current.key === "amountUsd" && walletMode
+                ? (deployable >= 1 ? [{ label: `All of it (${usd(deployable)})`, value: deployable }] : [])
                 : current.options ?? []
               ).map((o) => <button key={o.label} disabled={busy} onClick={() => answer(o.label, o.value)}>{o.label}</button>)}
             </div>

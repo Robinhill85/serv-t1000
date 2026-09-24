@@ -4,7 +4,7 @@
 // visible, send it for the user to confirm, then wait for the receipt. Stops at the first rejection or revert.
 import { parseAbi, type Address } from "viem";
 import type { Config } from "wagmi";
-import { getAccount, readContract, sendTransaction, switchChain, waitForTransactionReceipt } from "wagmi/actions";
+import { getAccount, readContract, switchChain, waitForTransactionReceipt } from "wagmi/actions";
 import { CHAINS } from "./config";
 import type { StepView } from "./use-t1000";
 import type { WalletStep } from "@/app/api/wallet-steps/route";
@@ -24,10 +24,24 @@ async function waitForAllowance(config: Config, s: WalletStep, owner: Address, t
   }
 }
 
+type Eip1193 = { request(args: { method: string; params?: unknown[] }): Promise<unknown> };
+
 function friendly(e: unknown): string {
-  const err = e as { name?: string; shortMessage?: string; message?: string; code?: number };
-  if (err?.name === "UserRejectedRequestError" || err?.code === 4001 || /reject|denied/i.test(err?.message ?? "")) return "You declined this in your wallet. Nothing after it was sent.";
-  return (err?.shortMessage ?? err?.message ?? String(e)).slice(0, 240);
+  const err = e as { name?: string; shortMessage?: string; message?: string; details?: string; code?: number; cause?: { message?: string } };
+  if (err?.name === "UserRejectedRequestError" || err?.code === 4001 || /reject|denied|cancel/i.test(err?.message ?? "")) return "You declined this in your wallet. Nothing after it was sent.";
+  // The wallet's own words first (viem's generic text hides them).
+  const own = err?.details ?? err?.cause?.message ?? err?.message ?? String(e);
+  return `Your wallet refused this step${err?.code ? ` (code ${err.code})` : ""}: ${own}`.slice(0, 280);
+}
+
+/**
+ * The plainest request every EIP-1193 wallet accepts: from, to, data. The wallet estimates gas and fees itself.
+ * (wagmi's sendTransaction first calls eth_estimateGas with extra fields some wallets reject: "Invalid parameters".)
+ */
+async function sendPlain(config: Config, owner: Address, s: WalletStep): Promise<`0x${string}`> {
+  const provider = (await getAccount(config).connector?.getProvider()) as Eip1193 | undefined;
+  if (!provider) throw new Error("Your wallet disconnected. Connect it again and retry.");
+  return (await provider.request({ method: "eth_sendTransaction", params: [{ from: owner, to: s.to, data: s.data, value: "0x0" }] })) as `0x${string}`;
 }
 
 /** Emits a full StepView per update: pending (awaiting signature / confirming), then confirmed or failed. */
@@ -43,8 +57,8 @@ export async function runWalletSteps(config: Config, steps: WalletStep[], owner:
         onStep(i, { ...base, detail: "Waiting for the approval to land…" });
         await waitForAllowance(config, s, owner);
       }
-      onStep(i, { ...base, detail: "Confirm in your wallet…" });
-      const hash = await sendTransaction(config, { to: s.to, data: s.data, chainId: s.chainId as never });
+      onStep(i, { ...base, detail: `Confirm in your wallet. ${s.explain}` });
+      const hash = await sendPlain(config, owner, s);
       const explorer = `${CHAINS[s.chain].explorer}/tx/${hash}`;
       onStep(i, { ...base, detail: "Sent, confirming…", hash, explorer });
       const receipt = await waitForTransactionReceipt(config, { hash, chainId: s.chainId as never });
@@ -52,6 +66,7 @@ export async function runWalletSteps(config: Config, steps: WalletStep[], owner:
       onStep(i, { ...base, ok, hash, explorer, detail: ok ? "Confirmed" : "Reverted onchain. Nothing after it was sent." });
       if (!ok) return false;
     } catch (e) {
+      console.error("T1000 wallet step failed", s.label, e);
       onStep(i, { ...base, ok: false, detail: friendly(e) });
       return false;
     }

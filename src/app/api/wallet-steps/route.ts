@@ -2,9 +2,10 @@
 // wallet. Re-checks the rulebook against that wallet's live funds and gas, builds the steps for that address, and
 // pre-flight-simulates every step from it with its real balances (nothing injected). The server never signs:
 // the browser sends each step to the user's wallet, which asks the user to confirm it.
-import { encodeFunctionData, type Address } from "viem";
+import { KNOWN_VAULTS } from "@ixswap1/vault-agent-sdk";
+import { encodeFunctionData, formatUnits, type Address } from "viem";
 import { z } from "zod";
-import { CHAINS, publicLimits, type ChainKey } from "@/lib/config";
+import { CHAINS, publicLimits, TOKENS, UNISWAP_RH, VENUES, type ChainKey } from "@/lib/config";
 import { buildMoveSteps, buildSteps, ixsRedeemMinUsd, simulate, type Step, type StepResult } from "@/lib/execute";
 import { guardState } from "@/lib/guard";
 import { checkExecutable, checkMoves } from "@/lib/plan-guard";
@@ -22,6 +23,8 @@ export type WalletStep = {
   venue: string; chain: ChainKey; chainId: number; label: string; to: Address; data: `0x${string}`;
   /** The allowance this step relies on, so the browser can wait until the approval is visible before sending. */
   spends?: { token: Address; spender: Address; amount: string };
+  /** What the user is about to sign, in plain words (wallets can mislabel approvals). */
+  explain: string;
 };
 export type WalletStepsResponse = { ok: boolean; errors: string[]; steps: WalletStep[]; simulation: StepResult[] };
 
@@ -43,8 +46,37 @@ const MovesBody = z.object({
   planToken: z.string().max(128),
 });
 
+const TOKEN_INFO: Record<string, { symbol: string; decimals: number }> = {
+  [TOKENS.base.USDC.toLowerCase()]: { symbol: "USDC", decimals: 6 },
+  [TOKENS.avalanche.USDC.toLowerCase()]: { symbol: "USDC", decimals: 6 },
+  [TOKENS.robinhood.USDG.toLowerCase()]: { symbol: "USDG", decimals: 6 },
+  [TOKENS.robinhood.WETH.toLowerCase()]: { symbol: "WETH", decimals: 18 },
+};
+const SPENDER_NAME: Record<string, string> = {
+  [VENUES.base.address!.toLowerCase()]: "Gauntlet USDC Prime (Morpho)",
+  [KNOWN_VAULTS["avax-ixhyb"].address.toLowerCase()]: "the IXS vault",
+  [UNISWAP_RH.swapRouter02.toLowerCase()]: "the Uniswap router",
+};
+
+/** Plain words for what the user signs. MetaMask can show a USDC approval as an "NFT withdrawal request". */
+function explain(s: Step): string {
+  if (s.functionName === "approve") {
+    const [spender, amount] = s.args as [Address, bigint];
+    const t = TOKEN_INFO[s.to.toLowerCase()];
+    const amt = t ? `${Number(formatUnits(amount, t.decimals)).toFixed(t.decimals === 18 ? 6 : 2)} ${t.symbol}` : amount.toString();
+    return `Lets ${SPENDER_NAME[spender.toLowerCase()] ?? spender} use exactly ${amt}. Nothing moves yet. Some wallets (MetaMask) label this an "NFT withdrawal request": it is a ${t?.symbol ?? "token"} spending cap.`;
+  }
+  if (s.functionName === "deposit") return "Deposits into Gauntlet USDC Prime on Morpho. You get vault shares and can withdraw any time.";
+  if (s.functionName === "requestDeposit") return "Requests a deposit into the IXS vault. It settles T+1; if IXS rejects it, the USDC comes back.";
+  if (s.functionName === "exactInputSingle") return "Swaps on Uniswap v3 with a slippage floor; the minimum you receive is in the step name.";
+  if (s.functionName === "withdraw") return "Withdraws from Gauntlet USDC Prime back to your wallet.";
+  if (s.functionName === "requestRedeem") return "Requests an exit from the IXS vault: settles T+1, 0.5% fee.";
+  return s.label;
+}
+
 function toWalletSteps(steps: Step[]): WalletStep[] {
   return steps.map((s) => ({
+    explain: explain(s),
     venue: s.venue, chain: s.chain, chainId: CHAINS[s.chain].chain.id, label: s.label, to: s.to,
     data: encodeFunctionData({ abi: s.abi, functionName: s.functionName, args: s.args } as never),
     spends: s.spends ? { token: s.spends.token, spender: s.spends.spender, amount: s.spends.amount.toString() } : undefined,

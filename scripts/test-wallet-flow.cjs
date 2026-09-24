@@ -77,7 +77,7 @@ const MOCK = (user) => {
   await page.getByRole("button", { name: "Scan my wallet" }).click();
   await page.getByText("Your wallet holds").first().waitFor({ timeout: 60000 });
   log("scan:", (await page.getByText("Your wallet holds").first().innerText()).slice(0, 220));
-  for (const label of ["UK", "$100", "3–12 months", "No, it can wait", "A mix", "Medium", "Skip"]) {
+  for (const label of ["UK", /All of it/, "3–12 months", "No, it can wait", "A mix", "Medium", "Skip"]) {
     await page.locator(".chips button", { hasText: label }).first().click();
     await page.waitForTimeout(400);
   }
