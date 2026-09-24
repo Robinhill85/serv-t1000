@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { VENUES, type VenueId } from "@/lib/config";
+import { GAS_MIN, GAS_SYMBOL, VENUES, type VenueId } from "@/lib/config";
 import { whenIntroDone } from "@/components/Intro";
 import type { Position, Profile } from "@/lib/types";
 import { DRIFT_PP } from "@/lib/rulebook";
@@ -99,6 +99,22 @@ function describeWallet(r: ScanResult): string {
     return `${CHAIN_LABEL[c]}: ${usd(stable)}${stable > 0 && (!gas || gas.amount === 0) ? " (no gas)" : ""}`;
   });
   return `Your wallet holds ${usd(r.idleStablesUsd)} in idle stablecoins. ${parts.join(" · ")}. I only plan with what each chain already holds (no bridging), and the IXS vault needs $100+ USDC on Avalanche.`;
+}
+
+/** Plain words for the rulebook's reason codes in wallet messages. */
+const plain = (t: string) => t
+  .replace(/NO_GAS_ON_CHAIN/g, "no ETH or AVAX for gas on that chain")
+  .replace(/NO_FUNDS_ON_CHAIN/g, "not enough stablecoins on that chain")
+  .replace(/JURISDICTION/g, "not available where you live")
+  .replace(/, INSTANT_LIQUIDITY|INSTANT_LIQUIDITY, /g, "");
+
+/** Chains holding stablecoins but no gas: the user can't deploy there until they add a little native token. */
+function gasGaps(r: ScanResult): string[] {
+  return (["base", "avalanche", "robinhood"] as const).filter((c) => {
+    const stable = r.holdings.filter((h) => h.chain === c && h.stable).reduce((a, h) => a + h.amount, 0);
+    const gas = r.holdings.filter((h) => h.chain === c && !h.stable && h.symbol !== "WETH").reduce((a, h) => a + h.amount, 0);
+    return stable >= 1 && gas < GAS_MIN[c];
+  }).map((c) => `${CHAIN_LABEL[c]} (add a little ${GAS_SYMBOL[c]})`);
 }
 
 const RISK_TEXT = "Real funds from my wallet. This is a hackathon beta and not financial advice. IXS is a regulated RWA vault: deposits settle T+1, exits cost 0.5%, and IXS can reject a request (the USDC comes back). ETH is volatile. I confirm every transaction in my wallet.";
@@ -266,8 +282,11 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
     if (!r) { say({ from: "agent", text: "I couldn't read your wallet. Try again in a moment." }); return; }
     if (!r.walletEnabled) { say({ from: "agent", text: "Wallet mode is switched off right now. The demo still works." }); return; }
     say({ from: "agent", text: describeWallet(r) });
-    if (r.idleStablesUsd < 5) {
-      say({ from: "agent", text: "There's not enough here to deploy yet. Add USDC on Base or Avalanche (or USDG on Robinhood Chain) plus a little gas, or try the demo." });
+    const gaps = gasGaps(r);
+    if (gaps.length) say({ from: "agent", text: `Heads-up: no gas on ${gaps.join(", ")}. I can plan it, but you can't send there until you add some. Around $0.10 is plenty.` });
+    // The smallest venue minimum is Base lending at $1; each chain also needs a little gas (checked in the plan).
+    if (r.idleStablesUsd < 1) {
+      say({ from: "agent", text: "There's under $1 in stablecoins here. Add USDC on Base (a dollar or two works, plus a little ETH for gas), USDC on Avalanche ($100+ for the IXS vault) or USDG on Robinhood Chain. Or try the demo." });
       return;
     }
     setStep(0);
@@ -387,7 +406,7 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
             {state.plan.adjustments.map((a) => <div key={a} className="plan-adjust">Guard: {a}</div>)}
             {state.plan.blocked.length > 0 && (
               <div className="plan-adjust wallet-block">
-                Your wallet can&apos;t fund this split: {state.plan.blocked.join(" ")} Restart with a smaller amount, or add funds on that chain.
+                Your wallet can&apos;t fund this split: {plain(state.plan.blocked.join(" "))} Restart with a smaller amount, or add funds or gas on that chain.
               </div>
             )}
             {state.plan.verified && state.plan.planToken && walletMode ? (
@@ -490,7 +509,10 @@ export function Chat({ state, onScan, onRun, onReset, onExecute, onExecuteWallet
         {current && !state.guard && (
           <>
             <div className="chips">
-              {current.options?.map((o) => <button key={o.label} disabled={busy} onClick={() => answer(o.label, o.value)}>{o.label}</button>)}
+              {(current.key === "amountUsd" && walletMode && state.idleStablesUsd
+                ? [{ label: `All of it (${usd(Math.min(state.idleStablesUsd, state.walletMaxRunUsd ?? Infinity))})`, value: Math.floor(Math.min(state.idleStablesUsd, state.walletMaxRunUsd ?? Infinity) * 100) / 100 }]
+                : current.options ?? []
+              ).map((o) => <button key={o.label} disabled={busy} onClick={() => answer(o.label, o.value)}>{o.label}</button>)}
             </div>
             <form className="chat-row" onSubmit={(e) => { e.preventDefault(); submitText(draft); }}>
               <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={current.placeholder} aria-label="Your answer" disabled={busy} />

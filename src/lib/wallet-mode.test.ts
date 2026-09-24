@@ -60,3 +60,22 @@ describe("venue ceilings are enforced in code", () => {
     expect(errs.some((e) => e.includes("exceeds the $500 cap"))).toBe(true);
   });
 });
+
+describe("small wallets", () => {
+  it("$2 of USDC on Base (with gas) is a valid Base-only plan", () => {
+    const small = { ...profile, amountUsd: 2 };
+    const e = eligibility(small, { ixs: ixsOpen, usMarketOpen: true, chainFunds: { base: 2 }, chainGas: { base: 0.001 } });
+    expect(e.base.allowed).toBe(true);
+    expect(e.ixs.allowed).toBe(false);
+    expect(e.rh_eth.allowed).toBe(false);
+    const { split } = enforce({ ixs: 0, base: 100, rh_eth: 0, rh_stocks: 0 }, small, e);
+    expect(split.base).toBe(100);
+    expect(checkExecutable([{ venue: "base", pct: 100, usd: 2 }], small, e, { enabled: true, maxRunUsd: 500 })).toEqual([]);
+  });
+  it("$2 on Base without ETH for gas is blocked with a clear reason", () => {
+    const small = { ...profile, amountUsd: 2 };
+    const e = eligibility(small, { ixs: ixsOpen, usMarketOpen: true, chainFunds: { base: 2 }, chainGas: { base: 0 } });
+    expect(e.base.allowed).toBe(false);
+    expect(e.base.reasons).toContain("NO_GAS_ON_CHAIN");
+  });
+});
